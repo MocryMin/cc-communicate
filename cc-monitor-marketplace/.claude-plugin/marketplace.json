@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cc-monitor-local",
+  "owner": {
+    "name": "Mocry"
+  },
+  "metadata": {
+    "description": "Local development marketplace for the cc-monitor plugin",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "cc-monitor",
+      "source": "./cc-monitor",
+      "description": "Maintains a live, read-only registry of open Claude Code sessions and exposes it to agents via the cc-monitor skill.",
+      "version": "0.1.0"
+    }
+  ]
+}

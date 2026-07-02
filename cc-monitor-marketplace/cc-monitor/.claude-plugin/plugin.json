@@ -1,0 +1,10 @@
+{
+  "name": "cc-monitor",
+  "description": "Maintains a live, read-only registry of open Claude Code sessions (pid, cwd, start time) and exposes it to agents via the cc-monitor skill.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Mocry"
+  },
+  "license": "MIT",
+  "keywords": ["sessions", "monitor", "registry", "process", "observability"]
+}
