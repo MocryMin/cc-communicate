@@ -1,6 +1,8 @@
 内核应该由多个模块组成。
 内核本身是一个退避的循环。循环基础频率为1khzsleep 0.001s，如果连续10000个循环没有事件，循环周期*10，直到退避到sleep 1s。
 所有事件都以文件的形式存在在queue临时文件夹中，外部调用某个内核功能（function:x），需要通过启动对应x.py中的x()，x会以只增的方式在queue添加一个排队文件，文件内包含外部调用生成的事件，等待内核处理。
+内核的启动是被动的。系统中同时只能有一个内核进程实例。具体地，所有用户函数执行时都会默认调用check_core.py：check_core 用 filelock 互斥地访问全局文件 core_status.json，其结构为 {status: 0|1, pid, start_time}。status=1 不代表"kernel 此刻在跑"，只代表"上次记录在跑"——check_core 必须用 psutil 验证 pid+start_time 仍存活（防 kernel 崩溃后 status 残留为 1），不活则视同 status=0。若判定需要启动，则保持锁、启动 kernel 进程，等待 kernel init 完成后写回 status=1+pid+start_time 作为 ready 信号，随后释放锁。详见技术难点 #11。
+内核的退出条件：alive_conversations 全部死亡，并且 10 分钟内没有新的 conversation 到来，并且 queue 为空。三者同时满足时，kernel 修改 core_status.json 为 status=0，将 alive_sessions 中还活着的 session 写入磁盘（data/ 下快照文件，下次 init 加载），随后自杀。退出竞态与兜底见 #11。
 
 
 ## datebase结构
@@ -115,6 +117,10 @@ sessionid发起的，关闭一个已经建立的到toid的连接。
 | 工具注册方式 | MCP tool（非 skill 描述的 Bash 调用）。每个用户函数 = 一个 `.py` MCP tool 文件，CC 通过 MCP 协议调用 |
 | 用户函数与内核通信 | 写 queue 文件排队。用户函数不能直接调内核函数——只写请求文件；内核轮询处理 |
 | 临时文件位置 | 全部放在 `PLUGIN_ROOT/data/` 下。`session_ctrl/` 专属事件日志（已占用），`server/` 放内核产物，`queue/` 放排队事件 |
+| 上层语言 | **Python**（非 Node）。下层 Node 已 freeze 不再变；上层选 Python 以保留人工审计与文件结构掌控能力。代价：插件依赖 Python 运行时（Win-only 目标下可接受；CC 不 bundle Python） |
+| 下层模块复用 | `proc.js` / `paths.js` 不直接 import，而是维护**冻结等价的 Python 实现** `proc.py`（psutil）/ `paths.py`。此为对 README §2.3 "import 同一模块"的放宽——下层已定型，漂移风险一次性、单向，做完对齐即可 |
+| 内核函数返回值投递 | kernel 处理完 queue 请求后，将结果写入 `queue/responses/<request_id>.json`（request_id 由请求文件名携带）。工具侧轮询该文件，带超时；超时则重跑 check_core 重试（见 #11c） |
+| 互斥原语 | `filelock` 包（纯 Python、跨平台）。core_status.json 访问互斥用它；alive_sessions 仍靠内核单线程串行免锁（见 #9） |
 
 ---
 
@@ -166,12 +172,12 @@ subprocess.Popen(
 **问题：** `alive_sessions` 内存表可能因为进程异常退出、pid 复用等原因与实际不一致。`check_alive` 需要可靠判断一个 session 是否真正活着。
 
 **解决方案：**
-- `proc.js` 已提供 `liveProcs()` → 返回全机 `Map<pid, start_time>` 映射
+- `proc.py`（psutil 实现，`proc.js` 的冻结等价）提供 `live_procs()` → 返回全机 `pid → start_time` 映射
 - `alive_sessions` 中有 `session_id → {pid, start_time}`
 - 四步校验：查 alive_sessions 有无 pid → OS 中 pid 是否存活 → 存活则比对 start_time（PID 复用防御）→ 不匹配则更新记录
-- 完全可行，实现复杂度低（一次 Map 查询 + 一次字符串比较）
+- 完全可行，实现复杂度低（一次 dict 查询 + 一次比较）
 
-**底层依赖：** `proc.js` 的 Windows 分支已通过 PowerShell CIM 验证；Linux `/proc` 和 macOS `ps` 分支已写但未测试。
+**底层依赖：** `proc.py` 用 `psutil`（跨平台，Windows 下底层即 CIM/WMI，与 `proc.js` 的 PowerShell 分支等价）。Linux 下 psutil 同样可用，无需手工解析 `/proc`。
 
 ---
 
@@ -210,7 +216,7 @@ subprocess.Popen(
 
 **问题：** cc-monitor 是被动生产者——只有 hook 触发后才写事件。插件安装前的 session 从未触发过 SessionStart hook，因此没有 session_id 可寻址。
 
-**可恢复的：** `proc.js` 可以扫描全机进程，找到所有 `claude.exe` 的 pid、cwd、start_time。
+**可恢复的：** `proc.py`（psutil）可以扫描全机进程，找到所有 `claude.exe` 的 pid、cwd、start_time。
 
 **不可恢复的：** `session_id` 只有 CC hook 触发时才知道（由 CC 通过 hook stdin 注入），从外部进程扫描无法恢复。
 
@@ -250,3 +256,26 @@ subprocess.Popen(
 **问题：** `claude --append-system-prompt "xxx"` 修改的是系统提示，但 CC 仍等待人类输入第一行。它不能自动触发首轮处理。
 
 **解决方案：** 不使用 `--append-system-prompt`，改用 `claude <prompt>` 位置参数作为首条消息。实测验证有效：CC 处理首条消息后进入 REPL，不退出。
+
+---
+
+### 11. 内核懒启动的生命周期与竞态
+
+**问题：** 内核是懒启动守护进程（check_core 按需拉起、空闲自杀），生命周期管理引入三类竞态：启动竞态、启动握手、退出竞态。`core_status.json` 结构为 `{status: 0|1, pid, start_time}`。
+
+**(a) 启动竞态——两个工具同时调 check_core：**
+- 互斥原语用 `filelock` 包（纯 Python、跨平台），不要自搓 msvcrt/fcntl 两套。
+- 获锁方读 status，判定需启动则拉起 kernel、等 ready 信号、写 status=1+pid+start_time、释放锁；无锁方阻塞等锁，获锁后读到 status=1、验活通过、直接返回。单实例由此保证。
+
+**(b) 启动握手——工具不能在 kernel 未就绪时写 queue：**
+- check_core 启动 kernel 后不立刻返回，轮询 core_status.json 直到 kernel 写回 status=1+pid+start_time（ready 信号），带超时。
+- Kernel init 第一步即写此文件，确保握手尽快完成。
+
+**(c) 退出竞态——kernel 自杀与工具写 queue 的小窗口：**
+- 场景：工具读到 status=1、验活通过 → kernel 此刻决定退出 → 工具写 queue 请求 → kernel 已死 → 请求永不被处理。
+- 兜底 1（kernel 侧）：退出条件含 queue 为空（已写入正文）。kernel 写 status=0 前再扫一次 queue，非空则撤销退出、继续循环。
+- 兜底 2（工具侧）：工具等响应必须带超时；超时则重跑 check_core（发现 kernel 没了 → 重启 → 重新提交 queue 请求）。工具侧永远要有 response 超时 + check_core 重试，不能无限等。
+
+**持久化与恢复：**
+- Kernel 退出时将 alive_sessions 落盘到 `data/` 下快照文件。
+- Kernel init 时若发现快照，加载之；随后 replay `session_ctrl/` 事件增量更新——事件日志是 ground truth，快照只是加速恢复。
