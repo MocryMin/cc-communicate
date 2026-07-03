@@ -69,3 +69,30 @@ def parse_pipe_filename(name: str):
         return int(ts_s), fromid, toid
     except ValueError:
         return None
+
+
+def count_undelivered(session_id: str) -> int:
+    """Count undelivered pipe messages addressed to session_id, across ALL
+    conversation folders. Used by arm_poller (baseline) and listen_poller
+    (detection).
+
+    Scanning all folders each call (rather than watching fixed dirs) means a
+    folder appearing AFTER arming — e.g. a brand-new partner's first message —
+    is still detected. Cheap for typical conversation counts."""
+    total = 0
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        return 0
+    for name in entries:
+        parts = name.split(SEP)
+        if len(parts) != 2 or session_id not in parts:
+            continue
+        pipe = os.path.join(CONVERSATIONS_DIR, name, "pipe")
+        if not os.path.isdir(pipe):
+            continue
+        for fname in os.listdir(pipe):
+            parsed = parse_pipe_filename(fname)
+            if parsed and parsed[2] == session_id:  # toid == session_id
+                total += 1
+    return total

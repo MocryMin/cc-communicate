@@ -77,5 +77,23 @@ def evoke(session_id: str) -> str:
     return rpc_client.call("evoke", {"session_id": session_id})
 
 
+@mcp.tool()
+def arm_poller(session_id: str, timeout: int = 1800) -> dict:
+    """Arm a background poller that watches for new messages addressed to
+    session_id. Returns {armed, command, timeout, watching}. Run `command`
+    via Bash with run_in_background=true; the poller exits 0 when a message
+    arrives (CC gets a <task-notification> and wakes), or 2 on timeout."""
+    return rpc_client.call("arm_poller", {"session_id": session_id, "timeout": timeout})
+
+
+@mcp.tool()
+def collect_messages(session_id: str) -> list:
+    """Collect all undelivered messages addressed to session_id, moving them to
+    the conversation log. Returns [{time, from_id, message}, ...] sorted by
+    time. Call this after the poller exits 0, then process messages and
+    re-arm (arm_poller) to continue listening."""
+    return rpc_client.call("collect_messages", {"session_id": session_id})
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

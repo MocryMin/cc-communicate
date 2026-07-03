@@ -8,21 +8,33 @@ requests here.
 Implemented:
   Read-only:  query_session, check_alive, query_conversations
   Messaging:  send_message, withdraw, register_conversation, unregister_conversation
+  Spawning:   evoke
+  Listening:  arm_poller, collect_messages  (the poller itself is listen_poller.py)
 
-TODO (later increments): evoke, and the conversation orchestration (connect,
-keep_listen, close_connection, create_collaborator) which lives in user-space
-MCP tools, not here.
+TODO (later increments): connect, close_connection, create_collaborator —
+user-space MCP tools that compose the functions above (connect's handshake,
+create_collaborator's spawn+connect). keep_listen as a user-facing concept is
+the arm_poller -> listen_poller.py -> collect_messages pattern, already wired.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
 
-from paths import CONVERSATIONS_DIR
+from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT
 from proc import proc_start_time
 import conversations
 import spawn
+
+
+def _atomic_write_json(path: str, obj):
+    """Write JSON via temp file + os.replace (atomic on same filesystem)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
 
 
 def query_session(sessions: dict, session_id: str):
@@ -169,3 +181,69 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
         prompt = "You have been spawned for p2p communication by cc-communicate. Wait for incoming messages from peer sessions."
     spawn.spawn_cc(cwd, prompt)
     return "evoke spawned"
+
+
+# ---------- listening (keep_listen: arm_poller + listen_poller.py + collect_messages) ----------
+
+def arm_poller(session_id: str, timeout: int = 1800) -> dict:
+    """Write a poller config for session_id and return the command CC should run
+    in the background (core_plan "用户函数 4a"). The poller (listen_poller.py)
+    exits 0 when a new message addressed to session_id arrives — anywhere,
+    including a newly-created conversation folder — or 2 on timeout.
+
+    Baseline = current undelivered count for session_id
+    (conversations.count_undelivered), so only messages arriving AFTER arming
+    are detected. The poller re-scans all folders each cycle, so a folder
+    appearing after arming (a new partner's first message) is still detected."""
+    baseline = conversations.count_undelivered(session_id)
+    deadline = time.time() + timeout
+    config = {"session_id": session_id, "baseline": baseline, "deadline": deadline}
+    os.makedirs(SERVER_DATA_DIR, exist_ok=True)
+    config_path = os.path.join(SERVER_DATA_DIR, f"poller_{session_id}.json")
+    _atomic_write_json(config_path, config)
+    cmd = f'python "{PLUGIN_ROOT}/server/listen_poller.py" "{session_id}"'
+    return {"armed": True, "command": cmd, "timeout": timeout, "baseline": baseline}
+
+
+def collect_messages(session_id: str) -> list:
+    """Read all undelivered pipe messages addressed to session_id, move them to
+    log/, return sorted by time (core_plan "用户函数 4c").
+
+    Returns [{time, from_id, message}, ...]. Only messages where toid ==
+    session_id are collected (a conversation's pipe holds both directions; each
+    peer collects only its own). Collected files move pipe -> log so the next
+    collect doesn't re-return them."""
+    result = []
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        return result
+    for name in entries:
+        parts = name.split(conversations.SEP)
+        if len(parts) != 2 or session_id not in parts:
+            continue
+        conv_d = os.path.join(CONVERSATIONS_DIR, name)
+        pipe = os.path.join(conv_d, "pipe")
+        log = os.path.join(conv_d, "log")
+        if not os.path.isdir(pipe):
+            continue
+        for fname in os.listdir(pipe):
+            parsed = conversations.parse_pipe_filename(fname)
+            if not parsed:
+                continue
+            ts, fr, to = parsed
+            if to != session_id:
+                continue  # addressed to the peer, not us
+            try:
+                with open(os.path.join(pipe, fname), encoding="utf-8") as f:
+                    content = f.read()
+            except OSError:
+                continue
+            result.append({"time": ts, "from_id": fr, "message": content})
+            os.makedirs(log, exist_ok=True)
+            try:
+                os.replace(os.path.join(pipe, fname), os.path.join(log, fname))
+            except OSError:
+                pass
+    result.sort(key=lambda x: x["time"])
+    return result

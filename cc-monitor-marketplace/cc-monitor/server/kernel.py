@@ -227,6 +227,10 @@ def _dispatch(function: str, args: dict):
         return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0))
     if function == "evoke":
         return kernel_api.evoke(sessions, args["session_id"])
+    if function == "arm_poller":
+        return kernel_api.arm_poller(args["session_id"], args.get("timeout", 1800))
+    if function == "collect_messages":
+        return kernel_api.collect_messages(args["session_id"])
     raise ValueError(f"unknown kernel function: {function}")
 
 
