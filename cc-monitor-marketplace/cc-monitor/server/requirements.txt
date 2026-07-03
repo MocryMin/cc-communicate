@@ -2,4 +2,4 @@
 # Install with:  python -m pip install -r server/requirements.txt
 psutil>=5.9
 filelock>=3.12
-# mcp  # added later when the MCP server / user-function tools are built
+mcp>=1.28
