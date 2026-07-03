@@ -22,6 +22,7 @@ import time
 from paths import CONVERSATIONS_DIR
 from proc import proc_start_time
 import conversations
+import spawn
 
 
 def query_session(sessions: dict, session_id: str):
@@ -141,3 +142,30 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
     candidates.sort(key=lambda x: x[0])
     os.remove(os.path.join(pipe, candidates[-1][1]))
     return f"withdrew latest message from {fromid}"
+
+
+# ---------- process spawning ----------
+
+def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
+    """Spawn a CC process in the session's cwd (core_plan "内核函数 5").
+
+    Reads cwd from sessions[session_id] (populated by process_session_ctrl_event
+    from the session's start event — core_plan #4). The spawned CC gets a NEW
+    session_id (CC generates a fresh one per start); that new id is discovered
+    later when its SessionStart hook fires → process_session_ctrl_event adds it
+    to sessions + alive_sessions. So evoke does NOT itself update alive_sessions
+    (no mutex needed here — the kernel's single-threaded loop handles the later
+    update; see core_plan #9).
+
+    Returns a status string. Fails if the session is unknown or has no cwd
+    (e.g. pre-install session — core_plan #6, or an end event with no start)."""
+    info = sessions.get(session_id)
+    if not info:
+        return "failed, session unknown"
+    cwd = info.get("cwd")
+    if not cwd:
+        return "failed, no cwd recorded for session"
+    if prompt is None:
+        prompt = "You have been spawned for p2p communication by cc-communicate. Wait for incoming messages from peer sessions."
+    spawn.spawn_cc(cwd, prompt)
+    return "evoke spawned"

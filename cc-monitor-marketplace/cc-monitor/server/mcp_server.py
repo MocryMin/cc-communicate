@@ -68,5 +68,14 @@ def withdraw(fromid: str, toid: str, init_connect: int = 0) -> str:
     return rpc_client.call("withdraw", {"fromid": fromid, "toid": toid, "init_connect": init_connect})
 
 
+@mcp.tool()
+def evoke(session_id: str) -> str:
+    """Spawn a new Claude Code session in the given session's working directory
+    (Windows). Use to revive a dead peer: the spawned CC loads the plugin and
+    waits for messages. The new CC gets a fresh session_id (discovered later via
+    its SessionStart hook). Fails if the session is unknown or has no cwd."""
+    return rpc_client.call("evoke", {"session_id": session_id})
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -225,6 +225,8 @@ def _dispatch(function: str, args: dict):
         return "ok"
     if function == "withdraw":
         return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0))
+    if function == "evoke":
+        return kernel_api.evoke(sessions, args["session_id"])
     raise ValueError(f"unknown kernel function: {function}")
 
 
