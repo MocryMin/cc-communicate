@@ -159,28 +159,23 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
 # ---------- process spawning ----------
 
 def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
-    """Spawn a CC process in the session's cwd (core_plan "内核函数 5").
+    """Revive a CC session by resuming it (core_plan "内核函数 5").
 
-    Reads cwd from sessions[session_id] (populated by process_session_ctrl_event
-    from the session's start event — core_plan #4). The spawned CC gets a NEW
-    session_id (CC generates a fresh one per start); that new id is discovered
-    later when its SessionStart hook fires → process_session_ctrl_event adds it
-    to sessions + alive_sessions. So evoke does NOT itself update alive_sessions
-    (no mutex needed here — the kernel's single-threaded loop handles the later
-    update; see core_plan #9).
+    Uses `claude --resume <session_id> <prompt>` (user-confirmed working) so the
+    SAME session_id is revived — connect can then talk to target_sid directly.
+    The revived CC fires SessionStart -> process_session_ctrl_event updates
+    alive_sessions with the new pid; connect polls check_alive until alive.
 
-    Returns a status string. Fails if the session is unknown or has no cwd
-    (e.g. pre-install session — core_plan #6, or an end event with no start)."""
-    info = sessions.get(session_id)
-    if not info:
+    No cwd needed (--resume restores it). No mutex here — the kernel's
+    single-threaded loop handles the alive_sessions update (core_plan #9).
+
+    Returns a status string. Fails if the session is unknown (not in sessions)."""
+    if session_id not in sessions:
         return "failed, session unknown"
-    cwd = info.get("cwd")
-    if not cwd:
-        return "failed, no cwd recorded for session"
     if prompt is None:
-        prompt = "You have been spawned for p2p communication by cc-communicate. Wait for incoming messages from peer sessions."
-    spawn.spawn_cc(cwd, prompt)
-    return "evoke spawned"
+        prompt = "You have been revived for p2p communication by cc-communicate. Check for pending messages from peer sessions."
+    spawn.spawn_cc_resume(session_id, prompt)
+    return "evoke spawned (resumed)"
 
 
 # ---------- listening (keep_listen: arm_poller + listen_poller.py + collect_messages) ----------

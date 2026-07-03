@@ -15,6 +15,7 @@ beyond a thin RPC wrapper, and will be added as the p2p layer is completed.
 from mcp.server.fastmcp import FastMCP
 
 import rpc_client
+import user_functions
 
 mcp = FastMCP("cc-communicate")
 
@@ -93,6 +94,16 @@ def collect_messages(session_id: str) -> list:
     time. Call this after the poller exits 0, then process messages and
     re-arm (arm_poller) to continue listening."""
     return rpc_client.call("collect_messages", {"session_id": session_id})
+
+
+@mcp.tool()
+def connect(caller_sid: str, target_sid: str, hold_time: int = 60) -> str:
+    """Establish a p2p connection to target_sid. If the target is dead, revives
+    it (claude --resume) and waits for it to come alive, sends a hello, then
+    blocks up to hold_time seconds waiting for the reply. Returns
+    'connect succeed; reply: ...' on success, or 'failed, ...' on failure
+    (unknown target, could not revive, no reply, timeout)."""
+    return user_functions.connect(caller_sid, target_sid, hold_time)
 
 
 if __name__ == "__main__":
