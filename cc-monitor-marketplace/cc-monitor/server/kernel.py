@@ -213,6 +213,18 @@ def _dispatch(function: str, args: dict):
         return kernel_api.query_session(sessions, args["session_id"])
     if function == "check_alive":
         return kernel_api.check_alive(alive_sessions, args["session_id"])
+    if function == "query_conversations":
+        return kernel_api.query_conversations(args["session_id"])
+    if function == "send_message":
+        return kernel_api.send_message(alive_conversations, args["fromid"], args["toid"], args["message"])
+    if function == "register_conversation":
+        kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
+        return "ok"
+    if function == "unregister_conversation":
+        kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
+        return "ok"
+    if function == "withdraw":
+        return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0))
     raise ValueError(f"unknown kernel function: {function}")
 
 

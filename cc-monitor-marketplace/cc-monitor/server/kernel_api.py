@@ -5,20 +5,28 @@ globals) so each function's state access is visible at the call site and the
 functions are easy to test in isolation. kernel.py's _dispatch() routes RPC
 requests here.
 
-Implemented (read-only):
-  - query_session(sessions, session_id)
-  - check_alive(alive_sessions, session_id)
+Implemented:
+  Read-only:  query_session, check_alive, query_conversations
+  Messaging:  send_message, withdraw, register_conversation, unregister_conversation
 
-TODO (later increments): evoke, withdraw, and the conversation functions.
+TODO (later increments): evoke, and the conversation orchestration (connect,
+keep_listen, close_connection, create_collaborator) which lives in user-space
+MCP tools, not here.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import time
+
+from paths import CONVERSATIONS_DIR
 from proc import proc_start_time
+import conversations
 
 
 def query_session(sessions: dict, session_id: str):
     """Return the session_inf dict for session_id, or None if unknown.
-    (core_plan "内核函数 3": returns the record, or 0/None if absent.)"""
+    (core_plan "内核函数 3".)"""
     return sessions.get(session_id)
 
 
@@ -32,8 +40,7 @@ def check_alive(alive_sessions: dict, session_id: str) -> int:
          (PID reuse), drop the record -> 0.
       4. All pass -> 1.
 
-    'Drop the record' mutates alive_sessions in place (the dict is passed by
-    reference from the kernel)."""
+    'Drop the record' mutates alive_sessions in place (passed by reference)."""
     info = alive_sessions.get(session_id)
     if not info:
         return 0
@@ -49,3 +56,88 @@ def check_alive(alive_sessions: dict, session_id: str) -> int:
         alive_sessions.pop(session_id, None)  # PID reuse — stale record
         return 0
     return 1
+
+
+# ---------- conversation registration ----------
+
+def register_conversation(alive_conversations: dict, sid_a: str, sid_b: str):
+    """Mark a conversation as active. connect() calls this after its handshake
+    succeeds. The key is an order-independent (sorted) tuple, so either peer
+    can unregister. Also used by the idle-exit condition (kernel stays alive
+    while any conversation is active)."""
+    a, b = sorted([sid_a, sid_b])
+    alive_conversations[(a, b)] = {"established_at": time.time()}
+
+
+def unregister_conversation(alive_conversations: dict, sid_a: str, sid_b: str):
+    a, b = sorted([sid_a, sid_b])
+    alive_conversations.pop((a, b), None)
+
+
+# ---------- messaging ----------
+
+def send_message(alive_conversations: dict, fromid: str, toid: str, message: str) -> str:
+    """Write a message to the conversation pipe (core_plan "用户函数 3", here as
+    a kernel function). Fails if the conversation is not registered (connect not
+    called, or peer closed it). Returns a status string."""
+    a, b = sorted([fromid, toid])
+    if (a, b) not in alive_conversations:
+        return "failed, connection not registered"
+    ts = int(time.time() * 1000)
+    d = conversations.ensure_conv_dir(fromid, toid)
+    path = os.path.join(d, "pipe", conversations.pipe_filename(fromid, toid, ts))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(message)
+    return f"message_sent at {ts}"
+
+
+def query_conversations(querier_sid: str) -> list:
+    """List conversation partners for querier_sid (core_plan "用户函数 1").
+    Returns [{partner: <sid>, ...}, ...]. Reads the conversations folder
+    directly (not alive_conversations) — includes ended-but-not-withdrawn
+    conversations, which is what compact-recovery needs."""
+    result = []
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        return result
+    for name in entries:
+        parts = name.split(conversations.SEP)
+        if len(parts) != 2:
+            continue
+        if querier_sid in parts:
+            partner = parts[1] if parts[0] == querier_sid else parts[0]
+            result.append({"partner": partner})
+    return result
+
+
+def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: int = 0) -> str:
+    """core_plan "内核函数 2".
+    init_connect=1: remove the whole conversation folder + unregister.
+    init_connect=0: remove fromid's latest undelivered message from the pipe."""
+    if init_connect:
+        d = conversations.conv_dir(fromid, toid)
+        if os.path.isdir(d):
+            shutil.rmtree(d)
+        unregister_conversation(alive_conversations, fromid, toid)
+        return "conversation withdrawn"
+    # Remove fromid's latest undelivered pipe message.
+    d = conversations.conv_dir(fromid, toid)
+    pipe = os.path.join(d, "pipe")
+    try:
+        files = os.listdir(pipe)
+    except FileNotFoundError:
+        return "no messages"
+    candidates = []  # (ts, filename)
+    for f in files:
+        parsed = conversations.parse_pipe_filename(f)
+        if not parsed:
+            continue
+        ts, f_from, _f_to = parsed
+        if f_from == fromid:
+            candidates.append((ts, f))
+    if not candidates:
+        return f"no messages from {fromid}"
+    candidates.sort(key=lambda x: x[0])
+    os.remove(os.path.join(pipe, candidates[-1][1]))
+    return f"withdrew latest message from {fromid}"
