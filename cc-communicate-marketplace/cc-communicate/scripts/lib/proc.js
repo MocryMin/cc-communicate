@@ -9,7 +9,7 @@ const fs = require('fs');
 function isClaudeCmd(cmd) {
   if (!cmd) return false;
   return /claude/i.test(cmd)
-    && !/cc-monitor/i.test(cmd)
+    && !/cc-communicate/i.test(cmd)
     && !/registrar\.js/i.test(cmd)
     && !/cc-status\.js/i.test(cmd);
 }

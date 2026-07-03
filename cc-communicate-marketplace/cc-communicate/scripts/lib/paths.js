@@ -1,5 +1,5 @@
 'use strict';
-// Resolves all cc-monitor filesystem locations.
+// Resolves all cc-communicate filesystem locations.
 // CLAUDE_PLUGIN_ROOT is set by Claude Code when it runs a plugin hook.
 // The __dirname fallback makes every script self-locating, so code invoked by
 // the skill/agent works even when that env var is not present.

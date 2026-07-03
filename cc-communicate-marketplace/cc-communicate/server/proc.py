@@ -1,4 +1,4 @@
-"""Process introspection for the cc-monitor upper layer.
+"""Process introspection for the cc-communicate upper layer.
 
 Frozen-equivalent of the parts of scripts/lib/proc.js that the upper layer
 uses. The upper layer reads events that already carry pid + start_time (for
@@ -98,7 +98,7 @@ def resolve_claude(self_pid: int):
             # Skip our own scripts (a spawned child's cmdline might reference
             # claude, e.g. `claude --resume ...`) — match the real claude binary.
             low = cmdline.lower()
-            if ("cc-monitor" in low or "registrar" in low or "mcp_server" in low
+            if ("cc-communicate" in low or "registrar" in low or "mcp_server" in low
                     or "listen_poller" in low or "kernel.py" in low):
                 continue
             return parent.pid, parent.create_time()

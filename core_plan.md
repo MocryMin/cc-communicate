@@ -214,7 +214,7 @@ subprocess.Popen(
 
 ### 6. 插件安装前启动的 session 无法参与 p2p
 
-**问题：** cc-monitor 是被动生产者——只有 hook 触发后才写事件。插件安装前的 session 从未触发过 SessionStart hook，因此没有 session_id 可寻址。
+**问题：** cc-communicate 是被动生产者——只有 hook 触发后才写事件。插件安装前的 session 从未触发过 SessionStart hook，因此没有 session_id 可寻址。
 
 **可恢复的：** `proc.py`（psutil）可以扫描全机进程，找到所有 `claude.exe` 的 pid、cwd、start_time。
 
@@ -231,7 +231,7 @@ subprocess.Popen(
 
 **问题：** 需要知道全机的 CC session，不限于在某个项目中注册的。
 
-**解决方案：** cc-monitor 本身就是统一入口。它的 hook 是**用户级**挂载——所有 CC 的 SessionStart/End 都写入同一个 `session_ctrl/` 文件夹。不需要再建设额外的入口。
+**解决方案：** cc-communicate 本身就是统一入口。它的 hook 是**用户级**挂载——所有 CC 的 SessionStart/End 都写入同一个 `session_ctrl/` 文件夹。不需要再建设额外的入口。
 
 **注意：** 见难点 #6——仅对插件安装**后**启动的 session 有效。
 

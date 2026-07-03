@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cc-communicate-local",
+  "owner": {
+    "name": "Mocry"
+  },
+  "metadata": {
+    "description": "Local development marketplace for the cc-communicate plugin",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "cc-communicate",
+      "source": "./cc-communicate",
+      "description": "P2P communication between Claude Code sessions: session registry via hooks, message pipes, keep_listen, connect, evoke, create_collaborator. Exposes 14 MCP tools.",
+      "version": "0.1.0"
+    }
+  ]
+}

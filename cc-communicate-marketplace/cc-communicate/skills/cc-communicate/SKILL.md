@@ -1,13 +1,13 @@
 ---
-name: cc-monitor
-description: Use when you need to know which Claude Code sessions are currently open — their process IDs, working directories, and liveness. Backed by an append-only session event log maintained by the cc-monitor plugin hooks.
+name: cc-communicate
+description: Use to discover and communicate with other Claude Code sessions on this machine — query sessions, check liveness, send messages, listen for replies, connect p2p, and spawn collaborator sessions.
 ---
 
-# cc-monitor — open session registry
+# cc-communicate — open session registry
 
 ## Architecture: append-only event log + kernel server
 
-The cc-monitor plugin records session activity as an **append-only log** of event
+The cc-communicate plugin records session activity as an **append-only log** of event
 files in `${CLAUDE_PLUGIN_ROOT}/data/session_ctrl/`:
 
 - `start_<event_ts>_<session_id>.json` — written by the **SessionStart** hook.

@@ -1,4 +1,4 @@
-# cc-monitor — lower-layer (hook / event producer) report
+# cc-communicate — lower-layer (hook / event producer) report
 
 This document covers **one layer only**: the lower layer that CC hooks run to
 record session activity. The upper layer (a kernel server that consumes the
@@ -89,7 +89,7 @@ entirely *inside* the upper layer; this lower layer is unaffected.)
 ## 2. Packing the upper + lower layers into one plugin
 
 When the upper layer (kernel server) is finished, both ship as files inside the
-same `cc-monitor` plugin directory. CC treats a plugin as one unit: hooks,
+same `cc-communicate` plugin directory. CC treats a plugin as one unit: hooks,
 scripts, and skills are all discovered by their location, so co-locating is
 sufficient — no cross-layer wiring is needed. Below is the checklist of **what
 to touch on this layer** when packing.
@@ -97,12 +97,12 @@ to touch on this layer** when packing.
 ### 2.1 Files this layer already owns (do not move/rename)
 
 ```
-cc-monitor/
+cc-communicate/
   hooks/hooks.json                 # declares SessionStart/End → registrar.js
   scripts/registrar.js             # the event producer (this layer's core)
   scripts/lib/paths.js             # path resolution (shared — see 2.3)
   scripts/lib/proc.js              # process introspection (shared — see 2.3)
-  skills/cc-monitor/SKILL.md       # the agent-facing skill description
+  skills/cc-communicate/SKILL.md       # the agent-facing skill description
   .claude-plugin/plugin.json       # plugin manifest
   .gitignore                       # excludes data/
 ```
@@ -117,7 +117,7 @@ cc-monitor/
   written (filename scheme, payload fields) — that is the contract from §1. If
   the schema ever needs to change, treat it as a versioned migration, not an
   in-place edit.
-- **Update `skills/cc-monitor/SKILL.md`** to point agents at the **upper
+- **Update `skills/cc-communicate/SKILL.md`** to point agents at the **upper
   layer's** entry point (e.g. a `server.js` / CLI it exposes) instead of the
   current "inspect the raw log" placeholder text. The skill is the *only* file
   where the two layers meet visibly — it describes to the agent how to query,
@@ -154,7 +154,7 @@ import the same modules** this layer uses, rather than re-deriving paths:
 
 ### 2.4 Runtime data directory
 
-`cc-monitor/data/` is created at runtime and **must not** be shipped or
+`cc-communicate/data/` is created at runtime and **must not** be shipped or
 committed (`.gitignore` already excludes it). When the upper layer is added:
 
 - The event log remains at `data/session_ctrl/` (this layer writes it; the upper
@@ -169,7 +169,7 @@ committed (`.gitignore` already excludes it). When the upper layer is added:
 
 ### 2.5 Versioning the contract
 
-Bump `cc-monitor/.claude-plugin/plugin.json` `version` whenever the event
+Bump `cc-communicate/.claude-plugin/plugin.json` `version` whenever the event
 filename scheme or payload schema changes. The upper layer should read the
 `event` field defensively and ignore unknown fields, so additive changes
 (`source` gaining values, new optional fields) stay forward-compatible.
@@ -181,9 +181,9 @@ filename scheme or payload schema changes. The upper layer should read the
 ### 3.1 File layout (current, lower layer only)
 
 ```
-cc-monitor-marketplace/                         ← marketplace root (for local install)
-├── .claude-plugin/marketplace.json             ← lists plugin "./cc-monitor"
-└── cc-monitor/                                 ← the plugin
+cc-communicate-marketplace/                         ← marketplace root (for local install)
+├── .claude-plugin/marketplace.json             ← lists plugin "./cc-communicate"
+└── cc-communicate/                                 ← the plugin
     ├── .claude-plugin/plugin.json              ← manifest
     ├── hooks/hooks.json                        ← SessionStart/End → registrar.js
     ├── scripts/
@@ -191,7 +191,7 @@ cc-monitor-marketplace/                         ← marketplace root (for local 
     │   └── lib/
     │       ├── paths.js                        ← path resolution (shared)
     │       └── proc.js                         ← process introspection (shared)
-    ├── skills/cc-monitor/SKILL.md              ← agent-facing skill
+    ├── skills/cc-communicate/SKILL.md              ← agent-facing skill
     ├── .gitignore                              ← excludes data/
     └── data/                                   ← runtime only (NOT shipped)
         ├── session_ctrl/                       ← append-only event log
@@ -273,7 +273,7 @@ record a transient shell, not the session. `resolveClaude(selfPid)`:
 1. Builds a process table (`pid → { ppid, cmd, start }`) — platform-specific
    (see 3.6).
 2. Walks up from `selfPid`, skipping self, until it finds an ancestor whose
-   command line matches `/claude/i` but excludes `cc-monitor` / `registrar.js`
+   command line matches `/claude/i` but excludes `cc-communicate` / `registrar.js`
    / `cc-status.js` (so it doesn't match its own scripts).
 3. Returns that ancestor's `{ pid, start (creation time), chain (for debug) }`.
 4. Fallback: if no claude ancestor is found, returns the immediate parent
@@ -358,8 +358,8 @@ rather than re-resolving paths.
 ## Appendix: install commands (unchanged)
 
 ```
-/plugin marketplace add "C:\研究生\实习\learn AI\projects\hello cc\cc-monitor-marketplace"
-/plugin install cc-monitor@cc-monitor-local
+/plugin marketplace add "C:\研究生\实习\learn AI\projects\hello cc\cc-communicate-marketplace"
+/plugin install cc-communicate@cc-communicate-local
 ```
 Then fully restart cc (SessionStart only fires for sessions starting while the
 plugin is active).

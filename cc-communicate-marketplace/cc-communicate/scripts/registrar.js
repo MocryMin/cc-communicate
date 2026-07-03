@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * cc-monitor registrar — APPEND-ONLY event logger.
+ * cc-communicate registrar — APPEND-ONLY event logger.
  * Invoked by Claude Code SessionStart / SessionEnd hooks.
  *   node registrar.js start   < (hook JSON on stdin)
  *   node registrar.js end     < (hook JSON on stdin)

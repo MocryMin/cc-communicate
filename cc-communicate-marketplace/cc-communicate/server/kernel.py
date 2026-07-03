@@ -1,4 +1,4 @@
-"""cc-monitor upper-layer kernel — a lazy-started, backoff-loop daemon.
+"""cc-communicate upper-layer kernel — a lazy-started, backoff-loop daemon.
 
 Started on demand by check_core.ensure_core(). Single instance is enforced by
 check_core's file lock; this process just runs once spawned.
@@ -59,7 +59,7 @@ alive_conversations: dict = {}       # (sid_a, sid_b) -> conv info  [no p2p yet;
 _last_activity: float = 0.0          # monotonic time of last queue activity
 
 _exit_requested = False
-log = logging.getLogger("cc-monitor.kernel")
+log = logging.getLogger("cc-communicate.kernel")
 
 
 # ---------- atomic JSON helpers ----------

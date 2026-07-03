@@ -1,4 +1,4 @@
-"""Filesystem locations for the cc-monitor upper layer (kernel + user functions).
+"""Filesystem locations for the cc-communicate upper layer (kernel + user functions).
 
 Frozen-equivalent of scripts/lib/paths.js. The first four constants
 (PLUGIN_ROOT, DATA_DIR, SESSION_CTRL_DIR, DEBUG_FILE) MUST stay in sync with

@@ -9,8 +9,8 @@ collaborator sessions on demand.
 
 | Layer | What | Status |
 |---|---|---|
-| **Lower** (Node) | `cc-monitor/scripts/` — hook-triggered event log: SessionStart/End → append-only JSON in `data/session_ctrl/` | ✅ built & verified (Windows) |
-| **Upper** (Python) | `cc-monitor/server/` — kernel daemon + MCP tools (queue RPC, session registry, p2p message pipes, keep_listen, connect, evoke, create_collaborator) | ✅ built & unit-tested (Windows) |
+| **Lower** (Node) | `cc-communicate/scripts/` — hook-triggered event log: SessionStart/End → append-only JSON in `data/session_ctrl/` | ✅ built & verified (Windows) |
+| **Upper** (Python) | `cc-communicate/server/` — kernel daemon + MCP tools (queue RPC, session registry, p2p message pipes, keep_listen, connect, evoke, create_collaborator) | ✅ built & unit-tested (Windows) |
 | **End-to-end** | Real two-CC p2p communication through an installed plugin | ❌ not yet tested |
 | **Linux** | Spawn + proc branches | ❌ stubs only (Win-only) |
 
@@ -22,10 +22,10 @@ Built in 8 commits (all pushed to `origin/main`, repo: `MocryMin/cc-communicate`
 ## Repository layout
 
 ```
-cc-monitor-marketplace/          ← marketplace root (for /plugin marketplace add)
+cc-communicate-marketplace/          ← marketplace root (for /plugin marketplace add)
 ├── .claude-plugin/
-│   └── marketplace.json          ← lists plugin ./cc-monitor
-└── cc-monitor/                   ← THE PLUGIN
+│   └── marketplace.json          ← lists plugin ./cc-communicate
+└── cc-communicate/                   ← THE PLUGIN
     ├── .claude-plugin/
     │   └── plugin.json           ← plugin manifest
     ├── .mcp.json                 ← MCP server declaration (CC reads this)
@@ -37,7 +37,7 @@ cc-monitor-marketplace/          ← marketplace root (for /plugin marketplace a
     │   └── lib/
     │       ├── paths.js          ← path constants (shared contract)
     │       └── proc.js           ← process introspection (shared contract)
-    ├── skills/cc-monitor/
+    ├── skills/cc-communicate/
     │   └── SKILL.md              ← agent-facing skill (⚠️ still placeholder — see §Remaining)
     └── server/                   ← UPPER LAYER (Python) — THIS IS WHAT WAS BUILT
         ├── paths.py              ← path constants (frozen-equiv of paths.js)
@@ -54,7 +54,7 @@ cc-monitor-marketplace/          ← marketplace root (for /plugin marketplace a
         └── requirements.txt      ← psutil, filelock, mcp
 ```
 
-The `data/` directory inside `cc-monitor/` is runtime-only (gitignored):
+The `data/` directory inside `cc-communicate/` is runtime-only (gitignored):
 
 ```
 data/
@@ -147,7 +147,7 @@ easy to test in isolation.
 ## MCP tools — the upper-layer CC interface
 
 All 14 tools are exposed via `mcp_server.py` (FastMCP, stdio transport).
-CC names them `mcp__plugin_cc-monitor_cc-communicate__<tool>`.
+CC names them `mcp__plugin_cc-communicate_cc-communicate__<tool>`.
 
 ### Identity
 
@@ -320,8 +320,8 @@ testing. `filelock` provides the cross-platform lock for `check_core`.
 ### Install
 
 ```
-/plugin marketplace add "C:\研究生\实习\learn AI\projects\hello cc\cc-monitor-marketplace"
-/plugin install cc-monitor@cc-monitor-local
+/plugin marketplace add "C:\研究生\实习\learn AI\projects\hello cc\cc-communicate-marketplace"
+/plugin install cc-communicate@cc-communicate-local
 ```
 
 Then **fully restart CC** (SessionStart only fires for sessions starting while the plugin is active).
@@ -338,7 +338,7 @@ query_session(<your_sid>)     # should return your session info
 ### In-process unit testing
 
 ```bash
-cd cc-monitor/server
+cd cc-communicate/server
 python -m pip install -r requirements.txt
 
 # Run individual test: kill leftover kernels first
@@ -369,7 +369,7 @@ powershell "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where
 
 ## Remaining work
 
-1. **`skills/cc-monitor/SKILL.md`** — still a lower-layer placeholder
+1. **`skills/cc-communicate/SKILL.md`** — still a lower-layer placeholder
    ("inspect the raw log"). Must be rewritten to describe the cc-communicate
    MCP tools (the 14-tool interface above) so CC agents discover and use them.
    README §2.2 said to update this when the upper layer was added.

@@ -1,4 +1,4 @@
-"""Ensures the cc-monitor kernel is alive before a user function runs.
+"""Ensures the cc-communicate kernel is alive before a user function runs.
 
 Every user-function MCP tool calls ensure_core() at entry. This lazily starts
 the kernel on first use and re-verifies it on every use. Single instance is
