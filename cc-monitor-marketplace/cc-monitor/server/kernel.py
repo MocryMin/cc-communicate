@@ -4,23 +4,28 @@ Started on demand by check_core.ensure_core(). Single instance is enforced by
 check_core's file lock; this process just runs once spawned.
 
 Lifecycle (core_plan #11):
-  INIT:  ensure dirs -> load alive_sessions snapshot -> write core_status.json
-         {status:1, pid, start_time} (the READY signal check_core waits for).
-  LOOP:  backoff 1ms..1s (core_plan "退避的循环"). Each cycle:
-           - process_session_ctrl_event(): replay new event-log files.
-           - [TODO] drain queue: dispatch request files to kernel functions.
-  EXIT:  when alive_conversations empty AND idle_timeout since last conversation
-         / queue activity AND queue empty (core_plan #11c). Writes status=0,
-         persists alive_sessions snapshot, exits. SIGINT/SIGTERM also trigger a
-         clean exit (status=0 + snapshot).
+  INIT:  load sessions.json -> replay session_ctrl event log (rebuilds
+         alive_sessions + catches up sessions.json) -> write core_status.json
+         {status:1, pid, start_time} (READY signal).
+  LOOP:  backoff 1ms..1s. Each cycle:
+           - process_session_ctrl_event(): replay new event-log files into
+             sessions + alive_sessions.
+           - drain_queue(): dispatch RPC requests to kernel_api, write responses.
+  EXIT:  when alive_conversations empty AND idle_timeout since last queue
+         activity AND queue empty (core_plan #11c). Writes status=0, saves
+         sessions.json, exits. SIGINT/SIGTERM also trigger clean exit.
 
-SCOPE OF THIS FILE: lifecycle skeleton only.
-  - process_session_ctrl_event() is minimal: marks events seen + logs them. The
-    full replay (start/end -> alive_sessions + sessions.json) is the NEXT
-    increment.
-  - Queue dispatch is a TODO stub.
-  - The real kernel functions (query_session, check_alive, evoke, withdraw) and
-    user-function RPC come after the lifecycle is verified end-to-end.
+State:
+  - sessions.json (persistent): registry of all known sessions. Loaded on init,
+    saved after each event batch and on exit. Upsert on start; mark ended on end.
+  - alive_sessions (in-memory): session_id -> {pid, start_time(epoch), cwd}.
+    Rebuilt from the event log on every init (event log is ground truth). The
+    plan's snapshot optimization (persist + incremental replay via watermark)
+    is deferred — replay-all is simple and fast for current event volumes.
+
+Kernel functions (dispatched via queue RPC, see kernel_api.py):
+  - query_session, check_alive  [implemented]
+  - evoke, withdraw, ...        [later increments]
 """
 from __future__ import annotations
 
@@ -30,26 +35,28 @@ import os
 import signal
 import time
 
+import kernel_api
 from paths import (
-    CORE_STATUS_FILE, ALIVE_SNAPSHOT_FILE, SERVER_DATA_DIR,
-    SESSION_CTRL_DIR, QUEUE_DIR, ensure_runtime_dirs,
+    CORE_STATUS_FILE, SERVER_DATA_DIR,
+    SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
+    ensure_runtime_dirs,
 )
-from proc import proc_start_time
+from proc import proc_start_time, parse_start_time
 
-# Idle exit timeout (seconds). Default 10 min per core_plan; override via env
-# for testing, e.g. CC_MONITOR_IDLE_TIMEOUT=10.
+# Idle exit timeout (seconds). Default 10 min per core_plan; override via env.
 _IDLE_TIMEOUT = float(os.environ.get("CC_MONITOR_IDLE_TIMEOUT", "600"))
 
-# Backoff parameters.
+# Backoff parameters (core_plan "退避的循环").
 _BASE_SLEEP = 0.001                  # 1 kHz
 _IDLE_CYCLES_BEFORE_BACKOFF = 10000  # consecutive idle cycles before *10
 _MAX_SLEEP = 1.0
 
 # In-memory state.
 _seen_events: set[str] = set()       # event filenames already processed (memory only)
-alive_sessions: dict = {}            # session_id -> {pid, start_time(epoch), cwd, ...}
+sessions: dict = {}                  # session_id -> session_inf  (mirror of sessions.json)
+alive_sessions: dict = {}            # session_id -> {pid, start_time(epoch), cwd}
 alive_conversations: dict = {}       # (sid_a, sid_b) -> conv info  [no p2p yet; empty]
-_last_activity: float = 0.0          # monotonic time of last conversation/queue activity
+_last_activity: float = 0.0          # monotonic time of last queue activity
 
 _exit_requested = False
 log = logging.getLogger("cc-monitor.kernel")
@@ -83,44 +90,130 @@ def _write_core_status(status: int):
     })
 
 
-# ---------- alive_sessions snapshot (persist on exit, load on init) ----------
+# ---------- sessions.json (persistent registry) ----------
 
-def _load_snapshot():
-    snap = _read_json(ALIVE_SNAPSHOT_FILE)
-    if isinstance(snap, dict):
-        alive_sessions.update(snap)
-        log.info("loaded alive_sessions snapshot: %d sessions", len(snap))
-
-
-def _persist_snapshot():
-    _atomic_write_json(ALIVE_SNAPSHOT_FILE, alive_sessions)
-    log.info("persisted alive_sessions snapshot: %d sessions", len(alive_sessions))
+def _load_sessions():
+    data = _read_json(SESSIONS_FILE)
+    if isinstance(data, dict):
+        sessions.update(data)
+        log.info("loaded sessions.json: %d sessions", len(sessions))
 
 
-# ---------- process_session_ctrl_event (MINIMAL — full replay is next increment) ----------
+def _save_sessions():
+    _atomic_write_json(SESSIONS_FILE, sessions)
+
+
+# ---------- process_session_ctrl_event (full replay) ----------
 
 def process_session_ctrl_event() -> bool:
-    """Scan data/session_ctrl/ for event files not yet seen, in lexical
-    (chronological) order, and process them.
-
-    Minimal version: mark seen + log. The full version will replay start events
-    into alive_sessions + sessions.json and end events into removal, per
-    core_plan "内核函数 1".
+    """Replay new session_ctrl event files into sessions + alive_sessions,
+    processed in event_ts order. NOT filename order — 'end_' sorts before
+    'start_' alphabetically, so filename sort is not chronological; the lower
+    layer's contract (README §1) explicitly requires sorting by event_ts.
+    Persists sessions.json after each batch.
 
     Returns True if any new event was processed (resets backoff). Note: session
-    events do NOT update _last_activity — only conversation/queue activity does
-    (the idle-exit condition is about conversations, not session presence)."""
+    events do NOT update _last_activity — only queue activity delays idle exit
+    (the exit condition is about conversations, not session presence)."""
     try:
-        files = sorted(os.listdir(SESSION_CTRL_DIR))
+        files = os.listdir(SESSION_CTRL_DIR)
     except FileNotFoundError:
         return False
-    new = [f for f in files if f.endswith(".json") and f not in _seen_events]
-    for f in new:
-        _seen_events.add(f)
+    new_names = [f for f in files if f.endswith(".json") and f not in _seen_events]
+    if not new_names:
+        return False
+    # Read each new event to get its event_ts, then sort chronologically.
+    pending = []
+    for f in new_names:
         ev = _read_json(os.path.join(SESSION_CTRL_DIR, f))
-        if ev:
-            log.info("event %s: kind=%s sid=%s", f, ev.get("event"), ev.get("session_id"))
-    return bool(new)
+        _seen_events.add(f)
+        ts = ev.get("event_ts", 0) if ev else 0
+        pending.append((ts, f, ev))
+    pending.sort(key=lambda x: x[0])
+    for ts, f, ev in pending:
+        if not ev:
+            continue
+        kind = ev.get("event")
+        sid = ev.get("session_id")
+        if not sid:
+            continue
+        if kind == "start":
+            _handle_start(ev, sid)
+        elif kind == "end":
+            _handle_end(ev, sid)
+        log.info("event %s: kind=%s sid=%s ts=%s", f, kind, sid, ts)
+    _save_sessions()
+    return True
+
+
+def _handle_start(ev: dict, sid: str):
+    """Upsert the session record (latest info wins; first_seen preserved) and
+    mark it alive."""
+    existing = sessions.get(sid, {})
+    sessions[sid] = {
+        "session_id": sid,
+        "pid": ev.get("pid"),
+        "cwd": ev.get("cwd"),
+        "start_time": ev.get("start_time"),                         # ISO (as written by proc.js)
+        "start_time_epoch": parse_start_time(ev.get("start_time")),  # epoch (parsed)
+        "source": ev.get("source"),
+        "started_at": ev.get("event_ts"),
+        "ended_at": None,
+        "first_seen": existing.get("first_seen", ev.get("event_ts")),  # preserve first discovery
+    }
+    alive_sessions[sid] = {
+        "pid": ev.get("pid"),
+        "start_time": parse_start_time(ev.get("start_time")),  # epoch for check_alive comparison
+        "cwd": ev.get("cwd"),
+    }
+
+
+def _handle_end(ev: dict, sid: str):
+    """Mark the session ended (kept in sessions.json; removed from alive_sessions)."""
+    alive_sessions.pop(sid, None)
+    if sid in sessions:
+        sessions[sid]["ended_at"] = ev.get("event_ts")
+
+
+# ---------- queue RPC dispatch ----------
+
+def drain_queue() -> bool:
+    """Process pending request files: dispatch to kernel_api, write responses,
+    remove requests. Returns True if any request was processed."""
+    try:
+        files = sorted(os.listdir(QUEUE_DIR))
+    except FileNotFoundError:
+        return False
+    reqs = [f for f in files if f.endswith(".json")]
+    for fname in reqs:
+        path = os.path.join(QUEUE_DIR, fname)
+        req = _read_json(path)
+        try:
+            if not req or "function" not in req or "request_id" not in req:
+                raise ValueError("malformed request")
+            result = _dispatch(req["function"], req.get("args") or {})
+            resp = {"request_id": req["request_id"], "result": result, "error": None}
+        except Exception as e:
+            log.exception("error handling request %s", fname)
+            resp = {"request_id": req.get("request_id") if req else None,
+                    "result": None, "error": f"{type(e).__name__}: {e}"}
+        rid = resp["request_id"]
+        if rid is not None:
+            _atomic_write_json(os.path.join(QUEUE_RESPONSES_DIR, rid + ".json"), resp)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return bool(reqs)
+
+
+def _dispatch(function: str, args: dict):
+    """Route a kernel function name to its implementation in kernel_api."""
+    if function == "query_session":
+        return kernel_api.query_session(sessions, args["session_id"])
+    if function == "check_alive":
+        return kernel_api.check_alive(alive_sessions, args["session_id"])
+    raise ValueError(f"unknown kernel function: {function}")
 
 
 # ---------- exit condition (core_plan #11c) ----------
@@ -174,10 +267,12 @@ def main():
     ensure_runtime_dirs()
     log.info("kernel starting (pid=%d, idle_timeout=%ss)", os.getpid(), _IDLE_TIMEOUT)
 
-    # INIT: load snapshot, THEN signal READY (check_core is polling for this).
-    _load_snapshot()
+    # INIT: load persistent registry, replay event log (rebuilds alive_sessions,
+    # catches up sessions.json), THEN signal READY.
+    _load_sessions()
+    process_session_ctrl_event()
     _write_core_status(1)
-    log.info("kernel READY — core_status.json written")
+    log.info("kernel READY — %d sessions known, %d alive", len(sessions), len(alive_sessions))
     _last_activity = time.monotonic()
 
     # LOOP with backoff.
@@ -185,10 +280,11 @@ def main():
     idle = 0
     try:
         while True:
-            busy = process_session_ctrl_event()
-            # TODO: drain queue — dispatch request files to kernel functions.
-            #       A processed request updates _last_activity (queue activity).
-            if busy:
+            ev_busy = process_session_ctrl_event()
+            q_busy = drain_queue()
+            if q_busy:
+                _last_activity = time.monotonic()  # queue activity delays idle exit
+            if ev_busy or q_busy:
                 sleep = _BASE_SLEEP
                 idle = 0
             else:
@@ -203,9 +299,9 @@ def main():
         log.exception("kernel crashed")
         raise
     finally:
-        log.info("kernel exiting — writing status=0, persisting snapshot")
+        log.info("kernel exiting — writing status=0, saving sessions.json")
         _write_core_status(0)
-        _persist_snapshot()
+        _save_sessions()
         log.info("kernel exited")
 
 

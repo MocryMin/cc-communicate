@@ -30,7 +30,7 @@ QUEUE_RESPONSES_DIR = os.path.join(QUEUE_DIR, 'responses')    # RPC response fil
 CONVERSATIONS_DIR   = os.path.join(DATA_DIR, 'conversations') # p2p message pipes + logs
 
 CORE_STATUS_FILE    = os.path.join(SERVER_DATA_DIR, 'core_status.json')
-ALIVE_SNAPSHOT_FILE = os.path.join(SERVER_DATA_DIR, 'alive_sessions.json')
+SESSIONS_FILE       = os.path.join(SERVER_DATA_DIR, 'sessions.json')  # persistent session registry
 
 
 def ensure_runtime_dirs():
