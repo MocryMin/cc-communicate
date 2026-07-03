@@ -140,6 +140,14 @@ import the same modules** this layer uses, rather than re-deriving paths:
   from here so both layers use one cross-platform implementation (Windows
   PowerShell/CIM verified; Linux `/proc` and macOS `ps` written but untested).
 
+> **Relaxed when the upper layer is Python** (see `core_plan.md` §0 "下层模块复用"):
+> the upper layer is Python, not Node, so it cannot `require()` these modules.
+> Instead it maintains **frozen-equivalent Python implementations** —
+> `server/proc.py` (psutil) and `server/paths.py` — matching the behavior of
+> `proc.js` / `paths.js`, which are frozen and will not change. The intent
+> (single source of truth, no divergence) is preserved; the mechanism (direct
+> import) is not.
+
 > The deleted `scripts/lib/store.js` (lock + atomic table) and
 > `scripts/cc-status.js` (old consumer) are **gone** — do not resurrect them.
 > The new model has no shared mutable table and therefore no lock.
