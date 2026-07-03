@@ -1,16 +1,17 @@
 """cc-communicate MCP server — thin shell exposing user functions as MCP tools.
 
 CC starts this process per session (see .mcp.json). The server holds NO state;
-every tool call forwards to the shared kernel via rpc_client.call() (which
-ensure_core()s the kernel, writes a queue request, polls for the response).
+each tool call either forwards to the shared kernel via rpc_client.call()
+(which ensure_core()s the kernel, writes a queue request, polls for the
+response), or calls user_functions for orchestration (connect, etc.).
 
-Tools currently exposed (one per kernel function):
-  query_session, check_alive, query_conversations,
-  send_message, register_conversation, unregister_conversation, withdraw.
-
-TODO (next increments): connect, keep_listen, close_connection,
-create_collaborator, evoke — these involve orchestration / process spawning
-beyond a thin RPC wrapper, and will be added as the p2p layer is completed.
+Tools exposed:
+  Identity:      my_session_id
+  Read-only:     query_session, check_alive, query_conversations
+  Messaging:     send_message, withdraw, register_conversation, unregister_conversation
+  Spawning:      evoke
+  Listening:     arm_poller, collect_messages
+  Orchestration: connect, close_connection, create_collaborator
 """
 from mcp.server.fastmcp import FastMCP
 
@@ -104,6 +105,32 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 60) -> str:
     'connect succeed; reply: ...' on success, or 'failed, ...' on failure
     (unknown target, could not revive, no reply, timeout)."""
     return user_functions.connect(caller_sid, target_sid, hold_time)
+
+
+@mcp.tool()
+def my_session_id() -> str:
+    """Discover this CC's own session_id. Walks the process tree up to the
+    claude.exe ancestor and looks up the session by pid. Call this first to get
+    your session_id for connect/close_connection/create_collaborator."""
+    return user_functions.my_session_id()
+
+
+@mcp.tool()
+def close_connection(session_id: str, toid: str) -> dict:
+    """Close the connection from session_id to toid. Drains pending messages
+    addressed to session_id (returns them as delivered_pending), notifies the
+    peer with a '[CONNECTION CLOSED]' message, and unregisters. The peer
+    learns of the close via its next collect_messages."""
+    return user_functions.close_connection(session_id, toid)
+
+
+@mcp.tool()
+def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 60) -> str:
+    """Spawn a NEW Claude Code session in cwd and connect to it. The new CC
+    loads the plugin and listens; this tool waits for it to register, then
+    connects. Returns connect's result, or 'failed' if the new CC doesn't
+    register within 30s (plugin not installed for new CCs)."""
+    return user_functions.create_collaborator(caller_sid, cwd, hold_time)
 
 
 if __name__ == "__main__":

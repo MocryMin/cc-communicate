@@ -242,3 +242,40 @@ def collect_messages(session_id: str) -> list:
                 pass
     result.sort(key=lambda x: x["time"])
     return result
+
+
+# ---------- session discovery ----------
+
+def session_by_pid(sessions: dict, pid: int):
+    """Return the session_id whose recorded pid matches, or None. Used by
+    my_session_id (resolve_claude finds the CC's pid, this maps it to a sid)."""
+    for sid, info in sessions.items():
+        if info and info.get("pid") == pid:
+            return sid
+    return None
+
+
+def find_new_session(sessions: dict, cwd: str, since_ts):
+    """Find the newest session whose cwd matches and started after since_ts
+    (core_plan #5, simplified — no pending-connect file). Used by
+    create_collaborator to discover the spawned CC's session_id after its
+    SessionStart hook fires. cwd is compared normalized (case/path-separator
+    insensitive); since_ts is an event_ts in ms."""
+    target = os.path.normcase(os.path.abspath(cwd))
+    best = None
+    best_ts = since_ts
+    for sid, info in sessions.items():
+        if not info:
+            continue
+        s_cwd = info.get("cwd")
+        if not s_cwd:
+            continue
+        if os.path.normcase(os.path.abspath(s_cwd)) != target:
+            continue
+        started = info.get("started_at")
+        if started is None:
+            continue
+        if started > best_ts:
+            best_ts = started
+            best = sid
+    return best

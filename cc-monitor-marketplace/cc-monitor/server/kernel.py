@@ -231,6 +231,10 @@ def _dispatch(function: str, args: dict):
         return kernel_api.arm_poller(args["session_id"], args.get("timeout", 1800))
     if function == "collect_messages":
         return kernel_api.collect_messages(args["session_id"])
+    if function == "session_by_pid":
+        return kernel_api.session_by_pid(sessions, args["pid"])
+    if function == "find_new_session":
+        return kernel_api.find_new_session(sessions, args["cwd"], args.get("since_ts", 0))
     raise ValueError(f"unknown kernel function: {function}")
 
 

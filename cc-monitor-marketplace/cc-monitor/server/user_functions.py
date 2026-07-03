@@ -18,7 +18,9 @@ import time
 
 import rpc_client
 import conversations
+import spawn
 from paths import PLUGIN_ROOT
+from proc import resolve_claude
 
 # How long to wait for a revived target to register as alive (evoke ->
 # SessionStart hook -> kernel adds to alive_sessions).
@@ -100,3 +102,58 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 60) -> str:
     # 8. timeout -> clean up.
     rpc_client.call("withdraw", {"fromid": caller_sid, "toid": target_sid, "init_connect": init_connect})
     return "connect failed, timeout waiting for reply"
+
+
+def my_session_id() -> str:
+    """Discover this CC's own session_id (core_plan gap — a CC needs its own sid
+    to call connect/etc.). Walks the process tree from this MCP server up to the
+    claude.exe ancestor (resolve_claude), then looks up the session by pid
+    (session_by_pid). Returns the session_id, or 'failed, ...'."""
+    pid, _ = resolve_claude(os.getpid())
+    if pid is None:
+        return "failed, could not find claude ancestor"
+    sid = rpc_client.call("session_by_pid", {"pid": pid})
+    return sid if sid else "failed, no session recorded for claude pid " + str(pid)
+
+
+def close_connection(session_id: str, toid: str) -> dict:
+    """Close the connection from session_id to toid (core_plan "用户函数 5").
+
+    Drains pending messages addressed to session_id (returns them), sends a
+    no-reply notification to toid, then unregisters. The notification is sent
+    BEFORE unregister (send_message requires the conversation registered); the
+    peer collects it via collect_messages (which doesn't check registration)."""
+    pending = rpc_client.call("collect_messages", {"session_id": session_id})
+    # best-effort notification; send_message requires registration, held until unregister
+    rpc_client.call("send_message",
+                    {"fromid": session_id, "toid": toid,
+                     "message": "[CONNECTION CLOSED by " + session_id + "]"})
+    rpc_client.call("unregister_conversation", {"sid_a": session_id, "sid_b": toid})
+    return {"closed": True, "delivered_pending": pending}
+
+
+def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 60) -> str:
+    """Spawn a NEW CC in cwd, wait for it to register, then connect (core_plan
+    "用户函数 6" + #5, simplified — no pending-connect file).
+
+    Spawns via spawn_cc_new, then polls find_new_session(cwd, since_ts) until
+    the new CC's SessionStart hook fires and the kernel registers it, then
+    connects. The new CC must load the plugin (user-level install) to be
+    discoverable. The spawn prompt instructs the new CC to my_session_id +
+    arm_poller + listen + reply. Returns connect's result, or 'failed' if the
+    new session doesn't register within 30s."""
+    since_ts = int(time.time() * 1000)
+    prompt = ("You are a new collaborator spawned by cc-communicate. "
+              "Call my_session_id to learn your id, then arm_poller and listen "
+              "for messages from your caller; reply to any hello.")
+    spawn.spawn_cc_new(cwd, prompt)
+    deadline = time.time() + 30
+    new_sid = None
+    while time.time() < deadline:
+        time.sleep(1)
+        new_sid = rpc_client.call("find_new_session", {"cwd": cwd, "since_ts": since_ts})
+        if new_sid:
+            break
+    if not new_sid:
+        return "failed, new session did not register within 30s (is the plugin installed for new CCs?)"
+    return connect(caller_sid, new_sid, hold_time)

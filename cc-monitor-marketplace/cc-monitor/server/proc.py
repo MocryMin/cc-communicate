@@ -1,11 +1,10 @@
 """Process introspection for the cc-monitor upper layer.
 
 Frozen-equivalent of the parts of scripts/lib/proc.js that the upper layer
-actually uses. proc.js also has resolveClaude() / isClaudeCmd() / getProcTable()
-for the *lower* layer — registrar.js walks the hook process tree to find the
-claude ancestor when writing start events. The upper layer does NOT resolve
-claude ancestors: it reads events that already carry pid + start_time, and only
-needs to verify liveness. Those lower-layer functions are therefore not ported.
+uses. The upper layer reads events that already carry pid + start_time (for
+liveness), AND resolves the claude ancestor (for my_session_id — the MCP
+server walks up from its own pid to find the calling CC's claude.exe). Both
+needs are covered here via psutil.
 
 Uses psutil (cross-platform). On Windows, psutil's create_time() reads the same
 Win32 FILETIME that proc.js's CIM branch reads, so epoch values agree across
@@ -76,3 +75,33 @@ def parse_start_time(s) -> float | None:
         return datetime.fromisoformat(t).timestamp()
     except (ValueError, TypeError):
         return None
+
+
+def resolve_claude(self_pid: int):
+    """Walk up the process tree from self_pid to find the claude.exe ancestor.
+    Returns (pid, start_time_epoch) or (None, None).
+
+    Used by my_session_id: the MCP server is a child of claude.exe, so walking
+    up from the MCP server's pid finds the calling CC's pid, which is then
+    looked up in sessions to get the session_id. Upper-layer equivalent of
+    proc.js's resolveClaude (frozen lower layer)."""
+    try:
+        p = psutil.Process(self_pid)
+        for parent in p.parents():
+            try:
+                name = (parent.name() or "").lower()
+                cmdline = " ".join(parent.cmdline() or [])
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+            if "claude" not in name and "claude" not in cmdline.lower():
+                continue
+            # Skip our own scripts (a spawned child's cmdline might reference
+            # claude, e.g. `claude --resume ...`) — match the real claude binary.
+            low = cmdline.lower()
+            if ("cc-monitor" in low or "registrar" in low or "mcp_server" in low
+                    or "listen_poller" in low or "kernel.py" in low):
+                continue
+            return parent.pid, parent.create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return None, None
