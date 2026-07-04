@@ -72,17 +72,18 @@ def withdraw(fromid: str, toid: str, init_connect: int = 0) -> str:
 
 @mcp.tool()
 def evoke(session_id: str) -> str:
-    """Spawn a new Claude Code session in the given session's working directory
-    (Windows). Use to revive a dead peer: the spawned CC loads the plugin and
-    waits for messages. The new CC gets a fresh session_id (discovered later via
-    its SessionStart hook). Fails if the session is unknown or has no cwd."""
+    """Revive a dead CC session via `claude --resume <session_id>` (Windows).
+    The SAME session_id is resumed (not a fresh one), so connect can talk to
+    target_sid directly afterward. The revived CC fires SessionStart -> the
+    kernel updates alive_sessions with the new pid; poll check_alive until
+    alive. Returns 'evoke spawned (resumed)' or 'failed, session unknown'."""
     return rpc_client.call("evoke", {"session_id": session_id})
 
 
 @mcp.tool()
 def arm_poller(session_id: str, timeout: int = 1800) -> dict:
     """Arm a background poller that watches for new messages addressed to
-    session_id. Returns {armed, command, timeout, watching}. Run `command`
+    session_id. Returns {armed, command, timeout, baseline}. Run `command`
     via Bash with run_in_background=true; the poller exits 0 when a message
     arrives (CC gets a <task-notification> and wakes), or 2 on timeout."""
     return rpc_client.call("arm_poller", {"session_id": session_id, "timeout": timeout})
@@ -102,8 +103,9 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 60) -> str:
     """Establish a p2p connection to target_sid. If the target is dead, revives
     it (claude --resume) and waits for it to come alive, sends a hello, then
     blocks up to hold_time seconds waiting for the reply. Returns
-    'connect succeed; reply: ...' on success, or 'failed, ...' on failure
-    (unknown target, could not revive, no reply, timeout)."""
+    'connect succeed; reply: ...' on success, or a 'failed, ...' /
+    'connect failed, ...' string on failure (unknown target, could not revive,
+    no reply, timeout)."""
     return user_functions.connect(caller_sid, target_sid, hold_time)
 
 
@@ -119,8 +121,9 @@ def my_session_id() -> str:
 def close_connection(session_id: str, toid: str) -> dict:
     """Close the connection from session_id to toid. Drains pending messages
     addressed to session_id (returns them as delivered_pending), notifies the
-    peer with a '[CONNECTION CLOSED]' message, and unregisters. The peer
-    learns of the close via its next collect_messages."""
+    peer with a '[CONNECTION CLOSED by <session_id>]' message, and
+    unregisters. The peer learns of the close via its next collect_messages.
+    Returns {closed: True, delivered_pending: [...]}."""
     return user_functions.close_connection(session_id, toid)
 
 
