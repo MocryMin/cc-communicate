@@ -328,7 +328,7 @@ testing. `filelock` provides the cross-platform lock for `check_core`.
 
 ```bash
 # 1. Install Python deps (required — the MCP server imports mcp/psutil/filelock)
-pip install -r cc-communicate/server/requirements.txt
+pip install -r cc-communicate-marketplace/cc-communicate/server/requirements.txt
 
 # 2. Add the local marketplace and install the plugin (inside CC)
 /plugin marketplace add "<absolute path to cc-communicate-marketplace>"

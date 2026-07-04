@@ -107,7 +107,7 @@ section is updated. Follows the README install procedure step-by-step.
 - [ ] Activate it: `.venv-clean\Scripts\activate` (Windows).
       Expected: prompt shows `(.venv-clean)`.
 - [ ] Confirm deps absent: `python -c "import mcp"` — Expected: fails with `ModuleNotFoundError` (proves the venv is clean).
-- [ ] Install deps: `pip install -r cc-communicate/server/requirements.txt`
+- [ ] Install deps: `pip install -r cc-communicate-marketplace/cc-communicate/server/requirements.txt`
       Expected: psutil, filelock, mcp installed.
 - [ ] `/plugin marketplace add "<marketplace path>"` (if not already added).
 - [ ] `/plugin install cc-communicate@cc-communicate-local` (if not already).
