@@ -11,4 +11,4 @@ __pycache__/
 Thumbs.db
 
 # Temporary debug artifacts
-C:/Users/Mocry/cc-debug.log
+cc-debug.log
