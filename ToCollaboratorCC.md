@@ -317,14 +317,25 @@ testing. `filelock` provides the cross-platform lock for `check_core`.
 
 ## Install & test
 
+### Prerequisites
+
+- **Windows** (Linux is a stub, not implemented — see Roadmap)
+- **Python 3.x** with pip — the same `python` CC will invoke (must be on PATH when CC starts)
+- **Node.js** — for the SessionStart/End hooks
+- **Claude Code** — a version supporting plugins, `.mcp.json`, and hooks
+
 ### Install
 
-```
-/plugin marketplace add "C:\研究生\实习\learn AI\projects\hello cc\cc-communicate-marketplace"
+```bash
+# 1. Install Python deps (required — the MCP server imports mcp/psutil/filelock)
+pip install -r cc-communicate/server/requirements.txt
+
+# 2. Add the local marketplace and install the plugin (inside CC)
+/plugin marketplace add "<absolute path to cc-communicate-marketplace>"
 /plugin install cc-communicate@cc-communicate-local
 ```
 
-Then **fully restart CC** (SessionStart only fires for sessions starting while the plugin is active).
+Then **fully restart CC** (SessionStart only fires for sessions starting while the plugin is active). If you installed deps into a venv, launch CC from that venv's activated shell so `python` on PATH is the one with deps.
 
 ### Verify installation
 
@@ -357,36 +368,28 @@ failures). Check with:
 powershell "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { \$_.CommandLine -like '*kernel.py*' }).Count"
 ```
 
-### Real-CC testing (not yet done)
+### Real-CC testing
 
-1. Install the plugin, restart CC.
-2. Start a second CC with the plugin.
-3. Use `my_session_id` in each to get their session_ids.
-4. `connect(cc_a_sid, cc_b_sid)` from one, verify the reply.
-5. `send_message`, `arm_poller` + `Bash(poller, bg)` + `collect_messages` loop.
+✅ Validated in v0.1.0 — see [TEST_CHECKLIST.md](cc-communicate-marketplace/TEST_CHECKLIST.md). Core p2p loop (`my_session_id` → `connect` → `send_message` → `arm_poller` + `collect_messages` → `close_connection`) exercised manually.
 
 ---
 
-## Remaining work
+## Roadmap (post-v0.1)
 
-1. **`skills/cc-communicate/SKILL.md`** — still a lower-layer placeholder
-   ("inspect the raw log"). Must be rewritten to describe the cc-communicate
-   MCP tools (the 14-tool interface above) so CC agents discover and use them.
-   README §2.2 said to update this when the upper layer was added.
+v0.1.0 ships: SKILL.md (14-tool reference), manual end-to-end testing
+(see [TEST_CHECKLIST.md](cc-communicate-marketplace/TEST_CHECKLIST.md)),
+clean-venv portability validation, and the completed install procedure below.
+Remaining work:
 
-2. **Real-CC end-to-end testing** — install the plugin for real, start two CCs,
-   exercise the full p2p loop (`my_session_id` → `connect` → `send_message` →
-   `arm_poller` + poller + `collect_messages` → `close_connection` →
-   `create_collaborator`). All testing so far is in-process/simulated.
-
-3. **Linux support** — `spawn.py` and `proc.py` have stubs
-   (`raise NotImplementedError`). The Windows branches are verified. Linux
-   needs terminal-open commands (`gnome-terminal`/`xterm`) and `/proc`-based
-   process introspection (or `psutil` which already handles `/proc`).
-
-4. **Current CC's session not tracked** — the dev CC (Mocry's session) doesn't
-   have the plugin installed, so `my_session_id` returns "no session recorded".
-   Install + restart to make it discoverable.
+- **Auto dependency install** — a `server/launch.py` wrapper that `pip install`s
+  `requirements.txt` on first run, replacing the manual prerequisite. v0.1 uses
+  the manual `pip install` step (transparent, validates dep declarations); this
+  wrapper is the formal-release upgrade.
+- **Linux support** — `server/spawn.py` and `server/proc.py` have Windows-only
+  branches with `NotImplementedError` stubs. Linux needs terminal-open commands
+  (`gnome-terminal`/`xterm`) and `/proc`-based process introspection.
+- **Cross-machine testing** — v0.1 portability is validated in a clean venv on
+  the same machine. Real cross-machine install/run is the next milestone.
 
 ## Bug fix log
 
@@ -428,3 +431,24 @@ hooks worked because their `CLAUDE_PLUGIN_ROOT` was unset, so `paths.js`'s
    `pid`/`exe`/`cwd`/`env`/`__file__` to a **fixed absolute path** — not
    relative to the very `PLUGIN_ROOT` you're debugging. This is how the literal
    `${CLAUDE_PLUGIN_ROOT}` was caught.
+
+### 2026-07-04 — `claude --cwd` not a valid flag, blocked `create_collaborator`
+
+**Symptom**: `create_collaborator` returned `"failed, new session did not
+register within 30s"`. The spawned CC opened a terminal window but immediately
+closed with `error: unknown option '--cwd'`. Session events confirmed: the new
+CC's SessionStart and SessionEnd were written in the same second.
+
+**Root cause**: `spawn.py:spawn_cc_new()` used `claude --cwd <dir> <prompt>`
+to open a new CC in a specific working directory, but `claude` has no `--cwd`
+flag. The option was documented as "verified" in code comments but had never
+been exercised end-to-end.
+
+**Fix** (commit `4d63b11`): Use Windows `start /D <cwd> claude <prompt>`
+instead — `start`'s `/D` flag sets the working directory of the new window
+before launching `claude`.
+
+**Reusable lesson**: Never assume a CLI flag exists without testing it against
+the actual binary. The `--cwd` flag was documented as "verified" in both the
+design plan and code comments, but the end-to-end test that would have caught
+it was itself listed as "not yet done" — a circular dependency.
