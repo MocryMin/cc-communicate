@@ -83,4 +83,43 @@ Run in **PowerShell** from the `cc-communicate-marketplace` directory.
 
 ---
 
-<!-- Part B (portability test) is appended by Task 5 after the root README install spec is updated. -->
+## Part B — Portability test (clean venv)
+
+Validates the plugin installs and runs from a clean state (no dev-machine
+dependency leakage). Run AFTER Part A passes and AFTER the root README install
+section is updated. Follows the README install procedure step-by-step.
+
+### Phase 0 — Hidden dependency audit (read code, no execution)
+
+- [ ] Confirm `scripts/registrar.js` imports only `fs`, `path`, and local
+      `./lib/proc`, `./lib/paths` (no npm packages). No `package.json` needed.
+      Expected: stdlib + local lib only.
+- [ ] Confirm `server/paths.py` resolves `PLUGIN_ROOT` via `CLAUDE_PLUGIN_ROOT`
+      env or `__file__`-relative fallback — no hardcoded dev paths.
+      Expected: portable resolution.
+- [ ] Confirm `.mcp.json` only assumes `python` + `node` on PATH.
+      Expected: no absolute paths.
+
+### Phase 1 — Clean venv install
+
+- [ ] Create a fresh venv: `python -m venv .venv-clean`
+      Expected: `.venv-clean/` created.
+- [ ] Activate it: `.venv-clean\Scripts\activate` (Windows).
+      Expected: prompt shows `(.venv-clean)`.
+- [ ] Confirm deps absent: `python -c "import mcp"` — Expected: fails with `ModuleNotFoundError` (proves the venv is clean).
+- [ ] Install deps: `pip install -r cc-communicate/server/requirements.txt`
+      Expected: psutil, filelock, mcp installed.
+- [ ] `/plugin marketplace add "<marketplace path>"` (if not already added).
+- [ ] `/plugin install cc-communicate@cc-communicate-local` (if not already).
+- [ ] Launch CC from the activated venv shell (so `python` on PATH = venv
+      python). Fully restart.
+      Expected: CC starts.
+
+### Phase 2 — Verify in clean env
+
+- [ ] `/mcp` — Expected: cc-communicate server listed (MCP server started, no import crash).
+- [ ] `my_session_id()` — Expected: a UUID (not `"failed, ..."`).
+- [ ] `query_session(<your sid>)` — Expected: session info dict.
+
+If all pass: the install procedure is portable. If the MCP server fails to
+start: a hidden dependency or path assumption was found — fix it and re-run.
