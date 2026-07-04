@@ -1,0 +1,14 @@
+# Workspace artifacts
+.venv-clean/
+.playwright-mcp/
+.superpowers/
+research-mcp-in-plugin*.md
+
+# OS files
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+
+# Temporary debug artifacts
+C:/Users/Mocry/cc-debug.log
