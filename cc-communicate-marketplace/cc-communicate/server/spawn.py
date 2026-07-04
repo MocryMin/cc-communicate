@@ -40,9 +40,13 @@ def _detached_popen(cmd_args):
 
 
 def spawn_cc_new(cwd: str, prompt: str):
-    """Spawn a NEW interactive CC in cwd. For create_collaborator."""
+    """Spawn a NEW interactive CC in cwd. For create_collaborator.
+    Uses `start /D` (Windows) to set the working directory of the new CC
+    window. `claude --cwd` was never a valid flag (confirmed 2026-07-04:
+    "unknown option --cwd"); `start /D <cwd> claude <prompt>` achieves the
+    same effect by having the shell change directory before launching CC."""
     if os.name == "nt":
-        _detached_popen(["cmd", "/c", "start", "claude", "--cwd", cwd, prompt])
+        _detached_popen(["cmd", "/c", "start", "/D", cwd, "claude", prompt])
     else:
         raise NotImplementedError("spawn_cc_new on Linux not yet implemented (Windows-only for now)")
 
