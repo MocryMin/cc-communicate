@@ -15,7 +15,10 @@ scripts/lib/ and uses '../..'; the resolved PLUGIN_ROOT is the same.)
 """
 import os
 
-PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT') or os.path.abspath(
+_env_root = os.environ.get('CLAUDE_PLUGIN_ROOT')
+# Fall back to __file__-relative if CLAUDE_PLUGIN_ROOT is unset OR was left as an
+# unsubstituted ${...} literal (some MCP runners don't substitute env values).
+PLUGIN_ROOT = _env_root if (_env_root and '${' not in _env_root) else os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..'))
 
 # --- shared with paths.js (keep in sync) ------------------------------------
