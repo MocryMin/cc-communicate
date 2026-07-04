@@ -387,3 +387,44 @@ powershell "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where
 4. **Current CC's session not tracked** — the dev CC (Mocry's session) doesn't
    have the plugin installed, so `my_session_id` returns "no session recorded".
    Install + restart to make it discoverable.
+
+## Bug fix log
+
+### 2026-07-04 — `CLAUDE_PLUGIN_ROOT` literal broke kernel startup
+
+**Symptom**: `my_session_id()` returned `"kernel not alive; could not start it"`.
+The kernel process spawned but never wrote `core_status.json` (the READY signal),
+so `ensure_core()` timed out after 15s. Reproduced across multiple CC sessions;
+the kernel was alive in the process list but produced zero output.
+
+**Root cause**: `.mcp.json` set `env: {"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"}`,
+but CC substitutes `${...}` only in `command`/`args`, **not in `env` values**. The
+MCP server thus received `CLAUDE_PLUGIN_ROOT` as the literal string
+`${CLAUDE_PLUGIN_ROOT}`. `paths.py`'s `or`-fallback never triggered (a non-empty
+literal is truthy), so `PLUGIN_ROOT` became a nonsense path. The kernel wrote
+`core_status.json` to a junk `${CLAUDE_PLUGIN_ROOT}/data/server/` folder while
+`ensure_core` polled a different junk path — they never matched → timeout. (The
+hooks worked because their `CLAUDE_PLUGIN_ROOT` was unset, so `paths.js`'s
+`__file__`-relative fallback resolved correctly.)
+
+**Fix** (commit `17c5e4e`):
+- `.mcp.json`: removed the `env` field — `paths.py`'s `__file__`-relative fallback
+  resolves the correct `PLUGIN_ROOT` without it.
+- `paths.py` / `paths.js`: added a `${` guard — if the env value contains `${`,
+  treat it as an unsubstituted literal and fall back to `__file__`-relative.
+
+**Reusable lessons**:
+1. **CC does not `${...}`-substitute `env` values in `.mcp.json`** — only
+   `command`/`args`. Don't put `${CLAUDE_PLUGIN_ROOT}` in `env`; rely on the
+   `__file__`-relative fallback in `paths.py`/`paths.js` instead.
+2. **Env-var fallbacks must guard against unsubstituted `${...}` literals.**
+   `os.environ.get('X') or fallback` is wrong, because a literal `${X}` is
+   truthy. Check `env and '${' not in env` before trusting the value.
+3. **"Process alive but produces no output" ⇒ suspect path/env resolution, not
+   the code.** A detached subprocess that hangs before its first log line is
+   almost certainly writing to a nonsense path resolved from a bad env var.
+4. **To debug a detached subprocess you can't attach to**, add a one-line
+   diagnostic at module-load time (before any imports that could hang) writing
+   `pid`/`exe`/`cwd`/`env`/`__file__` to a **fixed absolute path** — not
+   relative to the very `PLUGIN_ROOT` you're debugging. This is how the literal
+   `${CLAUDE_PLUGIN_ROOT}` was caught.
