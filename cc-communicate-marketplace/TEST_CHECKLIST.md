@@ -11,7 +11,7 @@ cleanup before every full run.
 ### Phase 0 — Hygiene cleanup
 
 - [ ] Kill leftover kernels:
-      `powershell "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { \$_.CommandLine -like '*kernel.py*' } | Stop-Process"`
+      `powershell "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { \$_.CommandLine -like '*kernel.py*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"`
       Expected: no error (or "no process found").
 - [ ] Clean runtime state:
       `rm -f cc-communicate/data/server/core_status.json*; rm -rf cc-communicate/data/queue cc-communicate/data/conversations`
