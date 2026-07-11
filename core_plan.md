@@ -1,3 +1,17 @@
+<!-- v2 变更标记说明 -->
+<!--
+  本文件是 cc-communicate v0.1 (Windows-only) 的原始设计文档。
+  WSL2 移植扩展设计见 wsl2_core_plan.md。
+
+  本文件中标注 [v2变更] 的部分在 WSL2 移植 (v2) 中有调整：
+  - 用户函数 1 query_conversation: 输出 list -> dict; 新增 is_local 隐参数 [v2变更]
+  - 用户函数 4 keep_listen: 3 步拆分(arm+poller+collect) -> 合并为单脚本 [v2变更]
+  - 内核函数 5 evoke: 内核态 -> 用户态; 新增跨机遍历 [v2变更]
+  - 用户函数 6 create_collaborator: 新增跨机 machine 参数 [v2变更]
+  - 技术难点 #1: spawn 方式新增 WSL2 tmux 分支 [v2变更]
+  详见 wsl2_core_plan.md 对应章节 + §技术难点 #W1-#W11。
+-->
+
 内核应该由多个模块组成。
 内核本身是一个退避的循环。循环基础频率为1khzsleep 0.001s，如果连续10000个循环没有事件，循环周期*10，直到退避到sleep 1s。
 所有事件都以文件的形式存在在queue临时文件夹中，外部调用某个内核功能（function:x），需要通过启动对应x.py中的x()，x会以只增的方式在queue添加一个排队文件，文件内包含外部调用生成的事件，等待内核处理。

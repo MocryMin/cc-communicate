@@ -229,19 +229,39 @@ rm -f cc-communicate/data/server/core_status.json*
 rm -rf cc-communicate/data/queue cc-communicate/data/conversations
 ```
 
-## 10. What's next (next phase)
+## 10. What's next: WSL2 移植设计已完成 (2026-07-11)
 
-The original plan (see `docs/superpowers/plans/2026-07-04-cc-communicate-v0.1-ship.md`) specified post-v0.1 roadmap items:
+本 session 完成了 cc-communicate WSL2 移植的**完整设计 + 可行性验证**。设计
+文档见 **`wsl2_core_plan.md`**（与 `core_plan.md` 配套阅读）。
 
-1. **Formal release packaging** — `launch.py` wrapper that auto-`pip install`s deps on first run (replaces manual prerequisite).
-2. **Linux support** — implement `spawn.py` / `proc.py` for Linux (`gnome-terminal`/`xterm`, `/proc` introspection).
-3. **Cross-machine testing** — validate portability on a truly different machine.
-4. **Fix `check_alive` for evoke-resumed CCs** — the process tree mismatch is the root cause; `resolve_claude` needs to handle the `cmd /c start` intermediate layer.
-5. **Fix `my_session_id` for evoked CCs** — same root cause as above.
-6. **Document `create_collaborator` workspace-trust limitation** — and explore if there's a CC config option to pre-trust specific directories.
+**设计要点**：
+- Phase 1: 在 WSL2 中部署独立 cc-communicate（tmux spawn，Linux kernel spawn）
+- Phase 2: 跨 realm 通信（双 kernel，host kernel 管跨机流量，WSL kernel 是
+  client；跨机消息存 host database；connect 保持 user-space 不阻塞 kernel）
+- 所有技术结论已实测验证（跨 realm 文件 I/O、进程执行、tmux pty、C:\ 根目录
+  握手等），builder 无需重复验证
 
-The user will tell you the specific next-phase task. This section is a summary of ALL remaining known work — pick whichever the user asks for.
+**下一 session 的任务**：按 `wsl2_core_plan.md` §7 Build 逐步清单实现：
+1. Phase 1：WSL 内独立 cc-communicate（spawn.py tmux + check_core.py Linux）
+2. Phase 2：跨 realm 通信（machine 注册 + is_local + 跨机 queue RPC + keep_listen
+   合并 + inform_connect）
+
+**关键阅读顺序**：
+1. `SESSION_HANDOFF.md`（本文件）- v0.1 现状
+2. `core_plan.md` - v0.1 基础设计
+3. `wsl2_core_plan.md` - v2 WSL2 移植设计（**含全部技术验证 + build 清单**）
+4. `ToCollaboratorCC.md` - v0.1 完整架构 + bug fix log
+
+### 其他 post-v0.1 roadmap items（未变）
+
+1. **Formal release packaging** - `launch.py` wrapper that auto-`pip install`s deps on first run (replaces manual prerequisite).
+2. **Fix `check_alive` for evoke-resumed CCs** - the process tree mismatch is the root cause; `resolve_claude` needs to handle the `cmd /c start` intermediate layer.
+3. **Fix `my_session_id` for evoked CCs** - same root cause as above.
+4. **Document `create_collaborator` workspace-trust limitation** - and explore if there's a CC config option to pre-trust specific directories.
+
+> 注：原 roadmap 中的 "Linux support" 和 "Cross-machine testing" 已被 WSL2
+> 移植设计（`wsl2_core_plan.md`）覆盖，不再是独立的 roadmap item。
 
 ---
 
-*Last updated: 2026-07-04. Model: dsv4. Branch: main. Tag: v0.1.0.*
+*Last updated: 2026-07-11. v0.1.0 shipped + WSL2 移植设计完成. Branch: main. Tag: v0.1.0.*
