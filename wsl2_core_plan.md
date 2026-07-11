@@ -524,12 +524,15 @@ MCP server 的 connect()（user-space 编排）:
      ★ WSL kernel 不注册！(WSL kernel 不追踪跨机对话)
   5. send_message(caller_sid, target_sid, hello) [via call_remote → host kernel]
      → host kernel 写 host conversations/pipe
-  6. arm + run listen_poller (本地)
-     → 扫描 /mnt/c/.../conversations/ 找 target_sid 的回复（只读）
+  6. run listen.py 合并脚本（本地, 替代旧 arm_poller → listen_poller → collect_messages 3 步）
+     → subprocess.run([sys.executable, "listen.py", caller_sid, str(hold_time)])
+     → listen.py 扫描 conversations/（WSL: 本地 + /mnt/c/ 只读；host: 本地）
+     → 检测到回复 → settle 3s → 归档(pipe→log, 本地直接移, 跨机委托 host kernel)
+     → stdout 输出消息 JSON → exit 0
      ★ 阻塞在 MCP server 进程，不阻塞任何 kernel
-  7. collect_messages(caller_sid) [via call_remote → host kernel]
-     → host kernel 读 host conversations/pipe + 归档 → 返回消息
-  8. 返回 connect succeed
+     ★ connect 是唯一跑 listen.py 的进程，防止双 poller 竞争（见 #W14）
+  7. 解析 listen.py stdout → 提取 target_sid 的回复 → 返回 connect succeed
+     （无需再调 collect_messages — listen.py 已做完检测+读取+归档）
 ```
 
 **关键变化 (v2.1)**：
@@ -540,6 +543,9 @@ MCP server 的 connect()（user-space 编排）:
   WSL kernel 退出后 ensure_core 会重启）。
 - 跨机 connect **不需要 inform_connect** 因为 WSL kernel 侧的信息对跨机通信
   无实际用途（只影响 idle-exit 判定，但 exit 了 ensure_core 也能 restart）。
+- **connect 改用 listen.py**：替代 v0.1 的 arm_poller → subprocess.run(listen_poller) →
+  collect_messages 三步流程。listen.py 是合并脚本，stdout 直接含消息 JSON，
+  无需再调 collect_messages。同时防止双 poller 竞争（#W14）。
 
 #### 3.4.3 send_message(fromid, toid, message)
 
@@ -1000,6 +1006,22 @@ poller 醒来什么都看不到。
 **解决方案**：合并后的 `listen.py` 使用**固定短间隔**（2-3 秒）或封顶 10
 秒。不用指数退避。跨机场景对端可能在任何时间发消息，大退避不适应这种需求。
 
+### #W14 双 poller 竞争
+
+**问题**：v0.1 的 connect 内部 spawn listen_poller 子进程监听回复。如果 CC 同时
+自己 arm 了后台 poller（如通过 skill 提前调用 arm_poller），就会有两个 poller
+同时监听同一个 pipe。先检测到的 poller 触发 collect_messages 归档消息（pipe→log），
+后检测到的 poller 看到空 pipe，永远等不到触发 → 误判超时。
+
+**实测验证**（2026-07-11）：审查 CC 在 connect 前已经 arm 了后台 poller
+（timeout=600s）。connect 发送 hello 后，target 在 8.3s 后回复。后台 poller
+（更早启动）先检测到 → collect_messages 归档回复 → connect 内部 poller 醒来
+看到 count_undelivered=0 → 继续睡 → timeout。
+
+**解决方案**：合并后的 `listen.py` 替代旧三步流程。**connect 是唯一运行
+listen.py 的进程**——不在 connect 外单独 arm poller。合并后的 listen.py
+归档（pipe→log）和 connect 的回复检测在同一进程中完成，不存在竞争。
+
 ---
 
 ## 5. Caution 清单（实现时必须注意的坑）
@@ -1020,6 +1042,7 @@ poller 醒来什么都看不到。
 | **C12** | **WSL 中 `python` 不在 PATH** | `.mcp.json` 和 arm_poller 命令失败 | `.mcp.json` 改 `"command": "python3"`；arm_poller 命令串用 `sys.executable` |
 | **C13** | **WSL 中 `which claude` 返回 Windows 版** | tmux spawn 起的是 Windows CC 而非 Linux CC | kernel init 时检测自己的 claude 二进制路径（`psutil.Process(resolve_claude_pid).exe()`），spawn 命令用全路径 |
 | **C14** | **跨机 queue request_id 碰撞** | 两个 MCP server 同时生成 uuid4 可能（极低概率）冲突 | 跨机请求文件名加 machine type 前缀（如 `wsl-ubuntu_<ts>_<rid>.json`） |
+| **C15** | **connect 外提前 arm poller 导致双 poller 竞争** | 两个 poller 同时监听，先检测者归档消息后，后者永远等不到触发 | connect 改用 listen.py 合并脚本，connect 是唯一运行 listen.py 的进程 |
 
 ---
 
@@ -1044,6 +1067,7 @@ poller 醒来什么都看不到。
 | **WSL `claude` 二进制路径** | `which claude` in WSL | ⚠️ 返回 `/mnt/c/...`（Windows 版），Linux claude 在 `/home/mocry/.npm-global/bin/claude` 不在默认 PATH（C13） | 2026-07-11 |
 | **WSL CC 进程名** | `psutil.Process(<pid>).name()` | ✅ 返回 `claude`（非 `claude.exe`），resolve_claude 可匹配 | 2026-07-11 |
 | **Poller 退避漏消息** | host CC armed 2min 后对方 connect | ❌ poller 在 300s 睡眠中，完全错过 60s 窗口（#W13） | 2026-07-11 |
+| **双 poller 竞争** | 前台 poller + connect 内部 poller 同时监听 | ❌ 前台 poller 先归档回复（pipe→log），connect 内部 poller 醒来看到空 pipe → 永远等不到 → timeout（#W14） | 2026-07-11 |
 
 ---
 
@@ -1075,7 +1099,7 @@ poller 醒来什么都看不到。
 | 2.4 | MCP tool 层新增 user-space 路由逻辑（query_session, check_alive, query_conversations, send_message, close_connection） | 本地/跨机返回正确结果 |
 | 2.5 | kernel 函数**删除 is_local 参数**，回到 v0.1 逻辑 | 本地操作不变，跨机不进入 kernel |
 | 2.6 | 合并 keep_listen 为单脚本 `listen.py`（固定 2-3s 间隔，一份脚本 + 运行时判断 type） | CC 一行 Bash 完成听消息 |
-| 2.7 | 调整 `connect`（跨机编排，user-space，**无 inform_connect**） | WSL CC ↔ host CC connect 成功 |
+| 2.7 | **connect 改用 listen.py**：替代旧 arm_poller → listen_poller → collect_messages 三步流程。`subprocess.run(listen.py, sid, timeout)`，stdout JSON 直接提取回复。connect 是唯一跑 listen.py 的进程（防双 poller 竞争 #W14）。**无 inform_connect**。 | WSL CC ↔ host CC connect 成功，无双 poller 竞争 |
 | 2.8 | 调整 `close_connection`（**无 inform_unconnect**） | 跨机关闭后双方状态正确 |
 | 2.9 | 实现 `create_conversation_folder` / `kernel_terminate` / `query_machines` | 各函数功能正常 |
 | 2.10 | 新增 kernel 函数 `spawn_cc_new`/`spawn_cc_resume`（供 call_remote 用） | host 能远程让 WSL kernel 本地 tmux spawn |
