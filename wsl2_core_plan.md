@@ -499,7 +499,7 @@ connect 改调 MCP server 的 `evoke()` 而非 `rpc_client.call("evoke",...)`。
 
 kernel 侧的 `query_conversations` **不变**（只查本地 conversations 目录）。
 
-#### 3.4.2 connect(caller_sid, target_sid, hold_time=60)
+#### 3.4.2 connect(caller_sid, target_sid, hold_time=300)
 
 **核心原则**：connect 保持 user-space（V1 模式），由调用方的 MCP server
 编排。kernel 只提供单步非阻塞 RPC。跨机编排在 MCP server，kernel 纯本地。
@@ -546,6 +546,9 @@ MCP server 的 connect()（user-space 编排）:
 - **connect 改用 listen.py**：替代 v0.1 的 arm_poller → subprocess.run(listen_poller) →
   collect_messages 三步流程。listen.py 是合并脚本，stdout 直接含消息 JSON，
   无需再调 collect_messages。同时防止双 poller 竞争（#W14）。
+- **hold_time 默认值延长**：从 v0.1 的 60s 延长到 **300s（5 分钟）**。跨机场景
+  对端 CC 的 LLM inference 延迟不确定（可能数秒到数十秒），60s 过于紧张。300s
+  给足余量。listen.py 的固定短间隔保证回复最早被检测到，不会空等整个 hold_time。
 
 #### 3.4.3 send_message(fromid, toid, message)
 
@@ -648,7 +651,7 @@ Bash("python3 <plugin_root>/server/listen.py <session_id> <timeout>", run_in_bac
 **v2.1 关键变化**：**无 inform_unconnect**。WSL kernel 不追踪跨机对话。
 host kernel 的 close_connection 处理后即完成，不需要通知 WSL kernel。
 
-#### 3.4.6 create_collaborator(caller_sid, cwd, hold_time=60)
+#### 3.4.6 create_collaborator(caller_sid, cwd, hold_time=300)
 
 **跨机 create_collaborator**：新增 kernel 函数 `spawn_cc_new(cwd, prompt)` /
 `spawn_cc_resume(sid, prompt)`。MCP server 通过 `call_remote` 让远端 kernel
