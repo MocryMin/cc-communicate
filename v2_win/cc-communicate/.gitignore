@@ -1,0 +1,6 @@
+# Runtime data (temporary, dynamic — never commit)
+data/
+
+# Python bytecode
+__pycache__/
+*.pyc
