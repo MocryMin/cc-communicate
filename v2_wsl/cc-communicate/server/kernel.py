@@ -150,7 +150,12 @@ def drain_queue() -> bool:
     reqs = [f for f in files if f.endswith(".json")]
     for fname in reqs:
         path = os.path.join(QUEUE_DIR, fname)
-        req = _read_json(path)
+        try:
+            req = _read_json(path)
+        except OSError:
+            # Transient read error (e.g. AV scan / write race on Windows) - leave
+            # the file for the next cycle instead of crashing the kernel. (T12)
+            continue
         try:
             if not req or "function" not in req or "request_id" not in req:
                 raise ValueError("malformed request")

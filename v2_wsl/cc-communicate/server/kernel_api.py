@@ -147,7 +147,7 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
         prompt = ("You have been revived for p2p communication by cc-communicate. "
                   "Call my_session_id to learn your id, then call listen and run "
                   "the returned command in the background, and reply to any hello "
-                  "from peer sessions.")
+                  "from peer sessions using send_message(your_id, peer_id, <message>).")
     spawn.spawn_cc_resume(session_id, prompt)
     return "evoke spawned (resumed)"
 

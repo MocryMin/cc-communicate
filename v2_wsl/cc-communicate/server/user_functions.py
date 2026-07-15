@@ -160,7 +160,10 @@ def _archive_reply(conv_remote, caller, fname, path):
     collect_messages (archives all undelivered for caller - fine, the reply is
     among them)."""
     if conv_remote is None:
-        conv_name = os.path.basename(conversations.conv_dir(caller, None))  # not used
+        # log_dir is derived from the pipe path directly (pipe -> log); we do NOT
+        # need conv_dir here. An earlier version computed conv_name via
+        # conv_dir(caller, None) as dead code - but sorted([str, None]) raises
+        # TypeError, crashing connect right when the reply arrived. (T12)
         log_dir = os.path.dirname(path).replace(os.sep + "pipe", os.sep + "log")
         try:
             os.makedirs(log_dir, exist_ok=True)
@@ -308,7 +311,8 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     # 5. register + send hello
     _register(caller_sid, target_sid, conv_remote)
     hello = ("connect hello from " + caller_sid + ". This is a p2p connection "
-             "request - reply immediately with any message to establish the channel.")
+             "request - reply immediately with send_message(your_session_id, "
+             + caller_sid + ", <any message>) to establish the channel.")
     send_res = _send(caller_sid, target_sid, hello, conv_remote)
     if "failed" in str(send_res):
         if init_connect:
@@ -340,8 +344,10 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
     """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it to
     register, then connect. The new CC must have the plugin installed."""
     prompt = ("You are a new collaborator spawned by cc-communicate. "
-              "Call my_session_id to learn your id, then call listen and run "
-              "the returned command in the background, and reply to any hello.")
+              "First call my_session_id to learn your id. Then call listen and "
+              "run the returned command in the background. When a peer sends you "
+              "a hello, reply with send_message(your_id, peer_id, <message>) - "
+              "do NOT call connect to reply.")
     since_ts = int(time.time() * 1000)
     if machine is None:
         spawn.spawn_cc_new(cwd, prompt)
