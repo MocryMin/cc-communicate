@@ -16,8 +16,17 @@ const fs = require('fs');
 // as the first token.
 function isClaudeCmd(cmd) {
   if (!cmd) return false;
-  const first = cmd.split(/\s+/)[0];
-  return /(^|\/|\\)claude(\.exe)?$/i.test(first);
+  // The executable is the first token; Windows double-quotes paths (especially
+  // those with spaces), and the trailing quote would break the basename test.
+  // Pull the first token respecting quotes, then test the basename.
+  let exe = cmd.trim();
+  if (exe.startsWith('"')) {
+    const end = exe.indexOf('"', 1);
+    exe = end > 0 ? exe.slice(1, end) : exe.slice(1);
+  } else {
+    exe = exe.split(/\s+/)[0];
+  }
+  return /(^|\/|\\)claude(\.exe)?$/i.test(exe);
 }
 
 /* ---- Windows ---------------------------------------------------------- */
@@ -121,4 +130,4 @@ function resolveClaude(selfPid) {
   return { pid: fb, start: map.has(fb) ? map.get(fb).start : null, chain };
 }
 
-module.exports = { getProcTable, resolveClaude, liveProcs, isClaudeCmd };
+module.exports = { getProcTable, resolveClaude, isClaudeCmd };
