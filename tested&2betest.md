@@ -117,6 +117,28 @@ expected result). Also see `log/implementation-log.md` for raw output.
   (`registrar.js`/`proc.js`) was never executed live - that's how both bugs
   slipped. JS-hook execution is now covered.
 
+### T11 - Live end-to-end on Windows host (B1 + cross-session discovery)
+- **Context**: after the T10 fix, installed v2_win, restarted CC with
+  `claude --resume`; a SECOND live CC (38e1e965, "GPU trail" dir) was also
+  registered. Two real CCs on one host.
+- **Method**: `my_session_id`; inspected `data/session_ctrl/` + `debug.log`;
+  `query_session(38e1e965)`; `check_alive(38e1e965)`.
+- **Result**:
+  - `my_session_id` -> `81e4c033-...` (real sid). `debug.log` shows the hook
+    fired on restart with `source=resume` -> **B1 CONFIRMED on Windows:
+    `claude --resume` fires SessionStart**. SessionEnd also fired (end event
+    before the resume-start).
+  - `query_session(38e1e965)` -> full info (pid 38404, cwd, start_time, machine
+    win-host). Cross-session discovery works.
+  - `check_alive(38e1e965)` -> 1 (pid + start_time verified). Liveness works.
+- **Cleanup note**: a fake `TEST_DIAG_SID` from T10's manual test had persisted
+  in `sessions.json` (kernel loads it on startup and only adds/updates from
+  session_ctrl, never removes unbacked entries). Fixed by stopping the kernel
+  (TERMINATE_FLAG), deleting `sessions.json`, letting it rebuild from
+  session_ctrl -> TEST_DIAG_SID gone. Not a real bug (only happens from manual
+  event-file deletion; real sessions end via SessionEnd events).
+- **Confidence**: high for Windows-host identity + discovery + liveness.
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -143,6 +165,9 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   `--resume`-fires-SessionStart sub-question is now testable (restart CC with
   `--resume`, call `my_session_id` -> a real sid means --resume fires
   SessionStart). WSL scenarios still need v2_wsl deployed.
+- **Update (T11)**: CONFIRMED on Windows host - `claude --resume` fires
+  SessionStart (hook logged `source=resume`); `my_session_id` returns the real
+  sid. WSL scenarios (a/b/c) still need v2_wsl deployed.
 
 ### B2 — #6 Trust dialog skip
 - **What**: does `--dangerously-skip-permissions` let a spawned CC start without
@@ -207,5 +232,6 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | connect end-to-end | LOW | not run (needs real CC reply) — B4 |
 | cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible, but no end-to-end — B5/B7 |
 | JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
-| `--resume` SessionStart (#1) | UNKNOWN (now testable) | T10 unmasked: hook fires, was crashing; --resume Q still open - B1 |
+| `--resume` SessionStart (#1) | high (Win) / UNKNOWN (WSL) | T11: --resume fires SessionStart confirmed on Windows; WSL untested - B1 |
+| cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
 | trust flag (#6) | UNKNOWN | unverified — B2 |
