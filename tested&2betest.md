@@ -390,7 +390,8 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Expected**: cross-realm connect succeeds; remote-wake restarts the host
   kernel (core_status goes 0 -> 1).
 - **Who**: user + me.
-- **Update (T16)**: machine_identity stale-type cache fixed (was blocking cross-realm - WSL was misidentified as win-host). Still need host CC + WSL CC both running + machine_add/machine_sign_up handshake.
+- **Update (T16)**: machine_identity stale-type cache fixed (was blocking cross-realm - WSL was misidentified as win-host). Handshake now DONE (B7). B5 unblocked: need a WSL CC running (user spawns), then host CC connect(81e4c033, <wsl_sid>) cross-realm + remote-wake (kill host kernel, WSL CC reconnects -> host kernel wakes, Amd8).
+- **Update (B5 connect CONFIRMED)**: host CC 81e4c033 -> WSL CC 6ee1ed2e cross-realm connect SUCCEEDED on retry. First attempt timed out (WSL-CC did not act on its listener notification during the 300s window - NOT a routing bug; the WSL listener HAD caught the hello). After WSL-CC re-armed + committed to prompt reply, connect(81e4c033, 6ee1ed2e, 300) -> "connect succeed; reply: WSL-CC reply: hello received, channel established. Cross-realm WSL<->Host connect confirmed." Hello ts 1784113771564 -> reply ts 1784113781969 = 10.4s round trip. Conv registered on host (cross-machine store=host); query_conversations(81e4c033) sees 6ee1ed2e; both msgs archived pipe->log. T14/T15/T16 all live-confirmed via this cross-realm path. Fallback bridge file D:/temporary_bridge.txt (append-only) used for sync. Remote-wake (Amd8) CONFIRMED: killed host kernel (pid 16492), WSL call_remote(host, check_alive, 81e4c033) returned 1 in 10.4s (= 10s dead-window + _wake_remote ran python.exe wake_kernel.py via WSL interop -> new host kernel pid 27752). Unicode wake_script_native path worked through WSL->Windows interop. Host MCP tools verified with new kernel (check_alive 81e4c033=1). B5 FULLY DONE (connect + remote-wake). Remaining: bidirectional ping (optional), B6 (9p visibility).
 
 ### B6 — 9p dir-change visibility
 - **What**: latency for a host-written file to appear in WSL `os.listdir(/mnt/c/)`.
@@ -407,6 +408,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   is peer-native.
 - **Expected**: both sides registered; fields correct.
 - **Who**: me (after v2_wsl deployed).
+- **Update (B7 CONFIRMED + T16 live)**: ran machine_add.py (host) + machine_sign_up.py (WSL, ~/projects/v2_wsl). Mutual registration succeeded. Host's WSL entry: data_dir=//wsl.localhost/Ubuntu/... (host perspective), wake_interpreter=python3, wake_script_native=WSL-native, distro=Ubuntu. WSL's host entry: data_dir=/mnt/c/... (WSL perspective), wake_interpreter=python.exe, wake_script_native=host-native, distro=null. C:\ clean (no residue). query_machines (host MCP) sees WSL peer 3b870f0d. T16 live-confirmed: WSL machine_identity regenerated as wsl-ubuntu (id 3b870f0d), not win-host. B7 DONE.
 
 ---
 
@@ -419,7 +421,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | Local kernel + RPC lifecycle | high | T4/T7 |
 | listen.py local path | high | T5 |
 | connect end-to-end | high | T13/T15 (Win) + WSL report: connect succeed end-to-end on both realms; B4 confirmed |
-| cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible; machine_identity stale-type fixed (T16); no end-to-end yet (B5/B7) |
+| cross-realm (call_remote, wake, handshake) | HIGH | B7 handshake DONE + B5 cross-realm connect CONFIRMED (host->WSL, 10.4s) + remote-wake (Amd8) CONFIRMED (WSL woke dead host kernel, new pid); T14/T15/T16 live-confirmed; bidirectional ping + B6 (9p) pending |
 | JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
 | `--resume` SessionStart (#1) | high (Win + WSL) | T11 (Win) + WSL report: --resume fires SessionStart on both realms; B1 confirmed |
 | cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
