@@ -81,6 +81,42 @@ expected result). Also see `log/implementation-log.md` for raw output.
 - **Result**: deps OK; `is_wsl=True`; `WSL_DISTRO_NAME=Ubuntu`.
 - **Confidence**: high.
 
+### T10 - JS-hook layer live (proc.js: liveProcs + isClaudeCmd quote bugs)
+- **Bugs found (live, after install)**: installing v2_win + `my_session_id`
+  always returned `"failed, no session recorded for claude pid <N>"`. Root cause
+  was NOT B1 (`--resume` not firing) - the SessionStart hook WAS firing, but
+  `registrar.js` crashed on `require('./lib/proc')`:
+  1. `proc.js` exported `liveProcs` (never defined) -> `ReferenceError` on module
+     load -> `registrar.js` died before writing anything -> no session ever
+     registered (any OS, any start mode).
+  2. `isClaudeCmd` did `cmd.split(/\s+/)[0]` + basename regex, but Windows CIM
+     reports the exe as a QUOTED path (`"…\claude.exe"`); the trailing `"` broke
+     the regex -> `resolveClaude` skipped the real claude and fell back to a
+     shell ancestor (wrong pid). Windows-only manifestation; WSL
+     `/proc/<pid>/cmdline` is unquoted so it wouldn't manifest there, but the fix
+     is defensive.
+- **v2_wsl applicability**: bug 1 is OS-independent (pure JS) -> must affect
+  v2_wsl too, fixed. Bug 2 is Windows-manifestation -> wouldn't fire on WSL, but
+  fix is in place (harmless). Verified: v2_wsl `registrar.js diag` returns the
+  real claude pid; v2_wsl `proc.js` byte-identical to v2_win's.
+- **Fix**: commit `1e03f21` - dropped `liveProcs` from exports (only
+  `resolveClaude` is imported); `isClaudeCmd` extracts the first token respecting
+  quotes before testing. Applied to BOTH v2_win and v2_wsl `proc.js`.
+- **Method**: `node registrar.js diag` (v2_win + v2_wsl) -> real claude pid (was
+  a bash shell pid); `echo {session_id:TEST_DIAG_SID,...} | node registrar.js
+  start` -> writes `start_<ts>_TEST_DIAG_SID.json` with correct claude pid +
+  start_time; then `my_session_id` (MCP) -> returns `TEST_DIAG_SID` (kernel
+  replayed the event, resolved pid->sid). Test event cleaned up after.
+- **Result**: full identity chain verified live (JS hook -> kernel ->
+  `my_session_id`) on Windows; v2_wsl `registrar.js diag` also returns the real
+  claude pid.
+- **Confidence**: high that session registration now works on Windows. The
+  `--resume`-fires-SessionStart question (B1) was being MASKED by this crash and
+  is now actually testable.
+- **Test gap**: T1-T9 exercised the Python side only; the JS hook
+  (`registrar.js`/`proc.js`) was never executed live - that's how both bugs
+  slipped. JS-hook execution is now covered.
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -101,6 +137,12 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   connect times out). Borrow the running `claude -r` (pid 19588 on host) or
   spawn one in WSL to test.
 - **Who**: me (after v2_wsl deployed) + user may need to grant trust / interact.
+- **Update (T10)**: the hook WAS firing all along - `registrar.js` was crashing
+  on `require('./lib/proc')` (liveProcs) so no event landed, mimicking "hook
+  didn't fire". After T10 the Windows hook records correctly; the
+  `--resume`-fires-SessionStart sub-question is now testable (restart CC with
+  `--resume`, call `my_session_id` -> a real sid means --resume fires
+  SessionStart). WSL scenarios still need v2_wsl deployed.
 
 ### B2 — #6 Trust dialog skip
 - **What**: does `--dangerously-skip-permissions` let a spawned CC start without
@@ -164,5 +206,6 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | listen.py local path | high | T5 |
 | connect end-to-end | LOW | not run (needs real CC reply) — B4 |
 | cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible, but no end-to-end — B5/B7 |
-| `--resume` SessionStart (#1) | UNKNOWN | unverified — B1, blocks evoke |
+| JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
+| `--resume` SessionStart (#1) | UNKNOWN (now testable) | T10 unmasked: hook fires, was crashing; --resume Q still open - B1 |
 | trust flag (#6) | UNKNOWN | unverified — B2 |
