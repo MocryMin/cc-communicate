@@ -139,6 +139,64 @@ expected result). Also see `log/implementation-log.md` for raw output.
   event-file deletion; real sessions end via SessionEnd events).
 - **Confidence**: high for Windows-host identity + discovery + liveness.
 
+### T12 - create_collaborator live: _archive_reply crash + prompt + kernel robustness (3 bugs)
+- **Context**: tested `create_collaborator(81e4c033, <project cwd>, hold_time=180)`
+  live. It spawned a NEW CC (45e9bb6e) in a new window with
+  `--dangerously-skip-permissions` + the collaborator prompt. The new CC
+  registered (start event 15:47:57), `find_new_session` found it, `connect`
+  sent the hello - the new CC's `listen.py` received + archived it (file in
+  `log/`). But `create_collaborator` returned
+  `TypeError: '<' not supported between instances of 'NoneType' and 'str'`.
+- **Bugs found (live)**:
+  1. **`_archive_reply` dead-code crash** (CRITICAL): the local branch computed
+     `conv_name = os.path.basename(conversations.conv_dir(caller, None))` -
+     `conv_name` was NEVER used, but `conv_dir` does `sorted([sid_a, sid_b])`
+     and `sorted([str, None])` raises exactly the TypeError above. So the moment
+     `connect`'s `_poll_reply` found the reply and tried to archive it, it
+     crashed - the connection was actually ESTABLISHED (reply received) but
+     connect could never return success. Reproduced in isolation:
+     `conv_dir('81e4...', None)` -> identical TypeError.
+  2. **Prompt ambiguity**: the collaborator prompt + connect hello said "reply
+     to any hello" / "reply immediately with any message" without saying HOW.
+     The spawned CC guessed `connect(...)` instead of `send_message(...)`. Its
+     connect-hello landed in my pipe and was what `_poll_reply` matched as the
+     reply (triggering bug 1). It also blocked 300s then `_withdraw` deleted its
+     own hello (why `pipe/` was empty on inspection).
+  3. **kernel `drain_queue` PermissionError crash**: kernel.log showed the
+     kernel crashed mid-request with `PermissionError: [Errno 13]` reading a
+     queue file (Windows transient - AV scan / write race). `_read_json` only
+     caught FileNotFoundError/JSONDecodeError, so PermissionError propagated
+     and killed the kernel (it self-restarted via ensure_core on next RPC).
+- **v2_wsl applicability**: all 3 are in shared code (user_functions.py,
+  kernel_api.py, kernel.py) -> affect v2_wsl identically. Bug 3's
+  PermissionError is a Windows manifestation (Linux file races differ) but the
+  guard is harmless there. Applied all fixes to BOTH v2_win and v2_wsl (cp'd
+  the 3 files; parity re-verified by diff).
+- **Fix**:
+  1. removed the dead `conv_name` line in `_archive_reply` (log_dir is derived
+     from the pipe path directly, no conv_dir needed).
+  2. connect hello + create_collaborator prompt + evoke prompt now explicitly
+     say to reply with `send_message(your_id, peer_id, <message>)` (and the
+     collaborator prompt says "do NOT call connect to reply").
+  3. `drain_queue` wraps `_read_json(path)` in `except OSError: continue` (skip
+     the file, retry next cycle) instead of crashing.
+- **Method**: repro `_archive_reply(None, sid, fname, real_pipe_path)` -> before
+  fix: TypeError; after fix: pipe file archived to log/ cleanly (verified).
+  `py_compile` on all 6 files (3 v2_win + 3 v2_wsl) OK. v2_win<->v2_wsl parity
+  diff clean.
+- **Result**: `_archive_reply` no longer crashes (verified). Bonus from the live
+  attempt: **B2 partially confirmed** - the spawned CC started with
+  `--dangerously-skip-permissions`, reached the REPL, and processed the prompt
+  (called my_session_id + listen) with NO trust-dialog block -> the flag works.
+  **B3 confirmed** - the spawned CC 45e9bb6e called `my_session_id` and got its
+  sid. The spawn->register->find->connect-hello->listen-receive chain all works
+  live; only the reply-archive step was broken (now fixed).
+- **Confidence**: high for the `_archive_reply` fix (reproduced+fixed+verified).
+  create_collaborator end-to-end still needs a clean re-run after the MCP server
+  reloads the fixed code (the running MCP server process has the old
+  user_functions.py cached). Stray CC 45e9bb6e left running (its connect timed
+  out; that window can be closed).
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -177,6 +235,10 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   REPL and processes the prompt.
 - **Expected**: no trust dialog; CC enters REPL and runs the prompt.
 - **Who**: me or user (spawns a real CC).
+- **Update (T12)**: PARTIALLY CONFIRMED - a spawned CC (45e9bb6e, via
+  create_collaborator) started with `--dangerously-skip-permissions`, reached
+  the REPL, and processed the prompt (called my_session_id + listen) with no
+  trust-dialog block. The flag works.
 
 ### B3 — BUG-1 end-to-end
 - **What**: a spawned/evoked CC (whose prompt contains "cc-communicate") can call
@@ -186,6 +248,8 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Expected**: returns a sid (was "failed, could not find claude ancestor"
   pre-fix).
 - **Who**: me (after B2).
+- **Update (T12)**: CONFIRMED - the spawned CC 45e9bb6e called my_session_id and
+  got its sid (B2 unblocked by the same spawn).
 
 ### B4 — connect end-to-end (single machine)
 - **What**: two CCs on the same machine: connect -> hello -> reply -> succeed.
@@ -229,9 +293,9 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | BUG-1, BUG-5 fixes | high | T2/T3/T6 |
 | Local kernel + RPC lifecycle | high | T4/T7 |
 | listen.py local path | high | T5 |
-| connect end-to-end | LOW | not run (needs real CC reply) — B4 |
+| connect end-to-end | MEDIUM | T12: spawn->hello->listen chain live; _archive_reply crash fixed; clean connect-succeed re-run pending MCP reload (B4) |
 | cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible, but no end-to-end — B5/B7 |
 | JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
 | `--resume` SessionStart (#1) | high (Win) / UNKNOWN (WSL) | T11: --resume fires SessionStart confirmed on Windows; WSL untested - B1 |
 | cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
-| trust flag (#6) | UNKNOWN | unverified — B2 |
+| trust flag (#6) | high | T12: spawned CC reached REPL with --dangerously-skip-permissions, no trust dialog block |
