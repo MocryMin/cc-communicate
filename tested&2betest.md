@@ -399,6 +399,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Expected**: < the listen.py poll window (2s) + settle (3s); if larger,
   listen.py cross-realm detection may lag -> adjust.
 - **Who**: me (host write + WSL poll).
+- **Update (B6 CONFIRMED)**: host wrote 25 probe files to v2_win/.../data/_9p_test/; WSL poller measured t_seen (WSL clock) - file_mtime (NTFS UTC) for each. Results: min=0.003s max=0.025s avg=0.013s median=0.013s; 25/25 within 0.5s (all within 25ms). 9p dir-change visibility is essentially instant (<25ms, dominated by the 20ms poll interval). listen.py's 2s poll window + 3s settle is ample - no adjustment needed. (WSL/Windows clocks aligned to ~0.1s, so the one-way mtime-based measurement is valid.) B6 DONE.
 
 ### B7 — handshake round-trip
 - **What**: `machine_add` (host) + `machine_sign_up` (WSL) complete and both
@@ -421,7 +422,8 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | Local kernel + RPC lifecycle | high | T4/T7 |
 | listen.py local path | high | T5 |
 | connect end-to-end | high | T13/T15 (Win) + WSL report: connect succeed end-to-end on both realms; B4 confirmed |
-| cross-realm (call_remote, wake, handshake) | HIGH | B7 handshake DONE + B5 cross-realm connect CONFIRMED (host->WSL, 10.4s) + remote-wake (Amd8) CONFIRMED (WSL woke dead host kernel, new pid); T14/T15/T16 live-confirmed; bidirectional ping + B6 (9p) pending |
+| cross-realm (call_remote, wake, handshake) | HIGH | B7 handshake DONE + B5 cross-realm connect CONFIRMED (host->WSL, 10.4s) + remote-wake (Amd8) CONFIRMED (WSL woke dead host kernel, new pid) + B6 9p visibility CONFIRMED (~13ms); T14/T15/T16 live-confirmed; only optional bidirectional ping remains |
+| 9p cross-realm file visibility (B6) | high | measured ~13ms avg (max 25ms), 25/25 < 0.5s; listen.py 2s window ample |
 | JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
 | `--resume` SessionStart (#1) | high (Win + WSL) | T11 (Win) + WSL report: --resume fires SessionStart on both realms; B1 confirmed |
 | cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
