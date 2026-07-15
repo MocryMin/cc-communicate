@@ -1,0 +1,5 @@
+# Upper-layer (Python) runtime dependencies for cc-communicate.
+# Install with:  python -m pip install -r server/requirements.txt
+psutil>=5.9
+filelock>=3.12
+mcp>=1.28

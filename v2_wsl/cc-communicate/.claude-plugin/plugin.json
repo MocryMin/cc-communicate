@@ -1,0 +1,10 @@
+{
+  "name": "cc-communicate",
+  "description": "P2P communication between Claude Code sessions — session registry, message pipes, keep_listen, connect, evoke, create_collaborator. Exposes 14 MCP tools.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Mocry"
+  },
+  "license": "MIT",
+  "keywords": ["sessions", "p2p", "communication", "monitor", "collaboration"]
+}
