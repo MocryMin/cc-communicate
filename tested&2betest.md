@@ -231,6 +231,89 @@ expected result). Also see `log/implementation-log.md` for raw output.
   81e4c033). Close 45e9bb6e's window; a1e02819 is a usable collaborator.
 - **Confidence**: high - create_collaborator + connect end-to-end verified live.
 
+### T14 - rpc_client _consume_response PermissionError (local RPC crash)
+- **Context**: retrying `connect(81e4c033, 5227028e)` after a create_collaborator
+  timeout; the connect's `check_alive` RPC hit a transient Windows
+  `PermissionError` reading the response file, crashing the whole connect call
+  (`Error executing tool connect: [Errno 13] Permission denied:
+  data/queue/responses/<rid>.json`).
+- **Bug**: `rpc_client._consume_response` (the LOCAL RPC path) caught only
+  `(FileNotFoundError, json.JSONDecodeError)` - NOT `OSError`/`PermissionError`.
+  So a transient AV-scan / write-race `PermissionError` on
+  `data/queue/responses/<rid>.json` propagated and killed the call. Inconsistent
+  with `_consume_remote` (the remote path), which already caught `OSError`. Same
+  class as the kernel `drain_queue` Bug 3 (T12).
+- **Fix**: add `OSError` to `_consume_response`'s except (returns None -> the
+  poll loop retries next cycle), mirroring `_consume_remote`.
+- **Files**: `rpc_client.py` (v2_win + v2_wsl, parity verified).
+- **v2_wsl applicability**: yes - same `rpc_client.py`; WSL is less AV-prone but
+  the write-race can still occur.
+- **Method**: reproduced (the connect error showed the exact path); fix verified
+  by py_compile + parity + logic review.
+- **Confidence**: high (clear inconsistency; the remote path already had it).
+
+### T15 - create_collaborator hold_time race + _poll_reply no final scan
+- **Context**: `create_collaborator` via the MCP tool (hold_time=120) spawned
+  5227028e. The CC replied at ts 1784105863935 = **120.95s after registering**
+  (start 1784105742984) - just past the 120s hold_time. `_poll_reply`'s deadline
+  (~register + 1-2s overhead + 120s) missed the reply by <1s; its 0.5s poll +
+  **no final scan** after the loop meant the last-window reply was lost.
+  `connect` returned "timeout"; `_withdraw` ran; the CC's (race-winning)
+  `send_message` then landed in a withdrawn conv. A retry connect repeated the
+  race; the CC's later reply hit "connection not registered" (conv withdrawn).
+- **Root cause**: NOT a logic bug - an extremely tight timing race at the
+  hold_time boundary. The CC cold-start (boot + tool load + listen + reply)
+  takes ~121s on Windows; 120s hold_time is too short. (On WSL the cold-start is
+  faster, so the WSL-only create_collaborator test succeeded - see WSL report.)
+- **The CC behaved correctly**: my_session_id -> listen -> run listener
+  (listen.py pid 16200) -> receive hello -> reply via **send_message** (NOT
+  connect). The T12 prompt fix is confirmed working through the actual MCP tool.
+  B2/B3/B4 re-confirmed via the MCP path.
+- **Fix 1 (user request)**: `_MIN_HOLD_TIME = 300` floor in create_collaborator
+  - `hold_time = max(hold_time, _MIN_HOLD_TIME)`. Prevents anyone overriding
+  below the cold-start budget. (Default stays 300 == the floor.)
+- **Fix 2 (robustness)**: `_poll_reply` refactored into a `_claim_reply` helper
+  + a **final scan** after the deadline, so a reply landing in the last 0.5s
+  poll window isn't missed.
+- **Note**: the CC ran listen.py with shell redirection (`> /tmp/log 2>&1 &`) +
+  manual `cat`-poll instead of `Bash(run_in_background=true)` task-notification.
+  Worked, but adds latency; the prompt's "run in the background" is ambiguous.
+  Not a code bug; possible prompt refinement later.
+- **Files**: `user_functions.py` (v2_win + v2_wsl, parity verified).
+- **v2_wsl applicability**: yes - same `user_functions.py`; the floor + final
+  scan protect WSL too (even though WSL already succeeded).
+- **Method**: analyzed the 5227028e transcript (reply ts vs start = 120.95s vs
+  hold_time 120s); read `_poll_reply` (confirmed 0.5s poll, no final scan); fix
+  verified by py_compile + parity + logic sanity (max clamp + final-scan path).
+- **Confidence**: high for the fix; a clean MCP-tool re-test (hold_time
+  auto-floored to 300) pending plugin reload.
+
+### T16 - machine_identity stale-type cache (deployment artifact, blocks B5)
+- **Context**: the WSL-only test report flagged `machine_identity` "Cached as
+  win-host; detect_type() correctly returns wsl-ubuntu - deployment artifact".
+  v2_wsl's `data/server/machine_identity.json` was copied from v2_win
+  (type=win-host) and `load_or_create()` trusted the cached type without
+  re-validating against `detect_type()`.
+- **Bug**: `load_or_create()` only regenerated when `type`/`id` fields were
+  MISSING, not when the cached `type` was WRONG. So a data dir copied across
+  realms keeps the wrong machine type -> cross-realm routing/handshake would
+  misidentify the WSL peer as win-host. Blocks B5/B7.
+- **Fix**: `load_or_create()` now compares the cached type to `detect_type()`; on
+  mismatch it regenerates type + id (a mismatch means the data dir came from a
+  different machine/realm, so a new id is correct). Also deleted the stale
+  v2_wsl `machine_identity.json` so it regenerates as wsl-ubuntu on next WSL CC
+  start.
+- **Files**: `machine_identity.py` (v2_win + v2_wsl, parity verified) + deleted
+  v2_wsl `data/server/machine_identity.json`.
+- **v2_wsl applicability**: this IS the v2_wsl fix; v2_win gets the same
+  robustness (a win-host cache on the actual host matches detect_type(), so no
+  spurious regen).
+- **Method**: read `machine_identity.py` (confirmed `load_or_create` trusted the
+  cached type); fix verified by py_compile + parity + logic sanity (win-host
+  cache -> REGENERATE, wsl-ubuntu cache -> KEEP).
+- **Confidence**: high; the WSL CC must reload (MCP restart) to pick up the fix
+  + regenerate its identity as wsl-ubuntu.
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -260,6 +343,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Update (T11)**: CONFIRMED on Windows host - `claude --resume` fires
   SessionStart (hook logged `source=resume`); `my_session_id` returns the real
   sid. WSL scenarios (a/b/c) still need v2_wsl deployed.
+- **Update (T16 / WSL report)**: CONFIRMED on WSL - SessionStart fires on both startup AND resume; SessionEnd fires; kernel lazy-starts and replays session_ctrl events. B1 fully confirmed on both realms.
 
 ### B2 — #6 Trust dialog skip
 - **What**: does `--dangerously-skip-permissions` let a spawned CC start without
@@ -273,6 +357,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   create_collaborator) started with `--dangerously-skip-permissions`, reached
   the REPL, and processed the prompt (called my_session_id + listen) with no
   trust-dialog block. The flag works.
+- **Update (T15 / WSL report)**: CONFIRMED on WSL too - spawned CC 3392e304 reached the REPL with --dangerously-skip-permissions, no trust dialog. B2 fully confirmed on both realms.
 
 ### B3 — BUG-1 end-to-end
 - **What**: a spawned/evoked CC (whose prompt contains "cc-communicate") can call
@@ -284,6 +369,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Who**: me (after B2).
 - **Update (T12)**: CONFIRMED - the spawned CC 45e9bb6e called my_session_id and
   got its sid (B2 unblocked by the same spawn).
+- **Update (T15 / WSL report)**: CONFIRMED on WSL - 3392e304 called my_session_id and got its sid.
 
 ### B4 — connect end-to-end (single machine)
 - **What**: two CCs on the same machine: connect -> hello -> reply -> succeed.
@@ -294,6 +380,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Update (T13)**: CONFIRMED - connect end-to-end via create_collaborator:
   81e4c033 connected to spawned a1e02819, hello sent, reply received via
   send_message, "connect succeed". Single-machine connect fully works.
+- **Update (T15 / WSL report)**: CONFIRMED on WSL - create_collaborator spawned 3392e304, "connect succeed; reply: Hello back from 3392e304...". Plus the full bidirectional lifecycle (send_message -> pipe -> listen -> reply -> caller listen -> close_connection -> clean shutdown). B4 fully confirmed on both realms.
 
 ### B5 — Cross-realm e2e (Phase 2) + remote wake
 - **What**: WSL CC ↔ host CC connect/send/listen/close; + remote-wake.
@@ -303,6 +390,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Expected**: cross-realm connect succeeds; remote-wake restarts the host
   kernel (core_status goes 0 -> 1).
 - **Who**: user + me.
+- **Update (T16)**: machine_identity stale-type cache fixed (was blocking cross-realm - WSL was misidentified as win-host). Still need host CC + WSL CC both running + machine_add/machine_sign_up handshake.
 
 ### B6 — 9p dir-change visibility
 - **What**: latency for a host-written file to appear in WSL `os.listdir(/mnt/c/)`.
@@ -330,9 +418,9 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | BUG-1, BUG-5 fixes | high | T2/T3/T6 |
 | Local kernel + RPC lifecycle | high | T4/T7 |
 | listen.py local path | high | T5 |
-| connect end-to-end | high | T13: connect succeed end-to-end via create_collaborator (hello->send_message reply->succeed); B4 confirmed |
-| cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible, but no end-to-end — B5/B7 |
+| connect end-to-end | high | T13/T15 (Win) + WSL report: connect succeed end-to-end on both realms; B4 confirmed |
+| cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible; machine_identity stale-type fixed (T16); no end-to-end yet (B5/B7) |
 | JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
-| `--resume` SessionStart (#1) | high (Win) / UNKNOWN (WSL) | T11: --resume fires SessionStart confirmed on Windows; WSL untested - B1 |
+| `--resume` SessionStart (#1) | high (Win + WSL) | T11 (Win) + WSL report: --resume fires SessionStart on both realms; B1 confirmed |
 | cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
-| trust flag (#6) | high | T12: spawned CC reached REPL with --dangerously-skip-permissions, no trust dialog block |
+| trust flag (#6) | high | T12 (Win) + WSL report: spawned CCs reach REPL with --dangerously-skip-permissions on both realms |

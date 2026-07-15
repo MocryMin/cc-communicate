@@ -32,6 +32,11 @@ import machine_identity
 from paths import CONVERSATIONS_DIR, PLUGIN_ROOT, MACHINE_INFO_LOG_DIR
 
 _REVIVE_WAIT = 30.0
+# Floor for create_collaborator hold_time. A freshly-spawned CC can take
+# >120s to boot + start its listener + reply on Windows (observed ~121s,
+# T15); a shorter hold_time races _poll_reply's deadline and misses the
+# reply by milliseconds. (T15)
+_MIN_HOLD_TIME = 300
 
 
 # ---------- machine registry helpers ----------
@@ -174,27 +179,38 @@ def _archive_reply(conv_remote, caller, fname, path):
         rpc_client.call_remote(conv_remote, "collect_messages", {"session_id": caller})
 
 
+def _claim_reply(pipe_dir, caller, target, conv_remote):
+    """Scan pipe_dir once for target's reply (a pipe file with toid==caller,
+    fromid==target). Returns the reply content (archiving the file), or None."""
+    for fname, path in _scan_pipe(pipe_dir, caller):
+        parsed = conversations.parse_pipe_filename(fname)
+        if not parsed or parsed[1] != target:
+            continue  # not from target
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+        _archive_reply(conv_remote, caller, fname, path)
+        return content
+    return None
+
+
 def _poll_reply(caller, target, hold_time, conv_remote):
     """Block up to hold_time scanning (in-process) for target's reply (a pipe
     file with toid==caller, fromid==target). Returns the reply content, or None
     on timeout. Reads content BEFORE archiving (Amd2: no false-timeout even if a
-    stray listener races us)."""
+    stray listener races us). A final scan after the deadline catches a reply
+    that landed in the last poll window. (T15)"""
     pipe_dir = _pipe_dir_for(caller, target, conv_remote)
     deadline = time.time() + hold_time
     while time.time() < deadline:
-        for fname, path in _scan_pipe(pipe_dir, caller):
-            parsed = conversations.parse_pipe_filename(fname)
-            if not parsed or parsed[1] != target:
-                continue  # not from target
-            try:
-                with open(path, encoding="utf-8") as f:
-                    content = f.read()
-            except OSError:
-                continue
-            _archive_reply(conv_remote, caller, fname, path)
-            return content
+        reply = _claim_reply(pipe_dir, caller, target, conv_remote)
+        if reply is not None:
+            return reply
         time.sleep(0.5)
-    return None
+    # final scan: a reply may have landed in the last 0.5s poll window. (T15)
+    return _claim_reply(pipe_dir, caller, target, conv_remote)
 
 
 # ---------- tools ----------
@@ -343,6 +359,10 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
                         machine=None) -> str:
     """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it to
     register, then connect. The new CC must have the plugin installed."""
+    # Enforce a floor: the spawned CC cold-starts (boot + tool load +
+    # listener + reply) and can exceed 120s on Windows; a shorter hold_time
+    # races _poll_reply. See T15. (hold_time default 300 == the floor.)
+    hold_time = max(hold_time, _MIN_HOLD_TIME)
     prompt = ("You are a new collaborator spawned by cc-communicate. "
               "First call my_session_id to learn your id. Then call listen and "
               "run the returned command in the background. When a peer sends you "

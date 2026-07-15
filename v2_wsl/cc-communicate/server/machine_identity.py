@@ -63,14 +63,22 @@ def load_or_create() -> dict:
     """Return this machine's identity dict, creating the file on first call.
 
     An existing file missing the optional claude_bin field is upgraded in place
-    (so a WSL kernel started before this field existed picks it up)."""
+    (so a WSL kernel started before this field existed picks it up). A cached
+    type that no longer matches detect_type() (e.g. the data dir was copied from
+    another machine/realm, carrying a stale identity) triggers a full regenerate
+    of type + id. (T16)"""
     try:
         with open(MACHINE_IDENTITY_FILE, encoding="utf-8") as f:
             ident = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         ident = None
-    if not isinstance(ident, dict) or "type" not in ident or "id" not in ident:
-        ident = {"type": detect_type(), "id": str(uuid.uuid4())}
+    detected = detect_type()
+    if (not isinstance(ident, dict) or "type" not in ident or "id" not in ident
+            or ident.get("type") != detected):
+        # Missing/invalid, or cached type is stale (data dir copied across
+        # realms - seen when v2_wsl shipped carrying v2_win's identity).
+        # Regenerate type + id. (T16)
+        ident = {"type": detected, "id": str(uuid.uuid4())}
     # Upgrade: ensure claude_bin is present on Linux (None on Windows).
     if "claude_bin" not in ident:
         ident["claude_bin"] = _detect_claude_bin()

@@ -51,7 +51,10 @@ def _consume_response(rid: str):
     try:
         with open(path, "r", encoding="utf-8") as f:
             resp = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        # OSError (e.g. transient PermissionError from AV scan / write race on
+        # Windows) - treat as not-ready and let the poll loop retry, mirroring
+        # _consume_remote. Without this the whole local RPC call crashes. (T14)
         return None
     try:
         os.remove(path)
