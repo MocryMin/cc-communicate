@@ -197,6 +197,40 @@ expected result). Also see `log/implementation-log.md` for raw output.
   user_functions.py cached). Stray CC 45e9bb6e left running (its connect timed
   out; that window can be closed).
 
+### T13 - create_collaborator end-to-end SUCCESS (fix verified live) + B4 confirmed
+- **Context**: re-ran create_collaborator after the T12 fix, via a direct Python
+  script importing the fixed `user_functions` fresh (the running MCP server still
+  had the old code cached; a script bypasses that). caller=81e4c033,
+  cwd=project, hold_time=120.
+- **Method**: script calls `user_functions.create_collaborator(...)`; it spawns a
+  new CC (a1e02819, pid 18132), `find_new_session` finds it, `connect` sends
+  hello, polls for the reply.
+- **Result**: `connect succeed; reply: Hello! I received your connect hello.
+  Channel established. My session ID is a1e02819-... Ready to collaborate - what
+  would you like to work on?`
+  - The hello (81e4c033 -> a1e02819) was delivered + archived by a1e02819's
+    listen.py (in `log/`).
+  - a1e02819 replied via **send_message** (a1e02819 -> 81e4c033) - the improved
+    prompt worked (the earlier 45e9bb6e had wrongly used connect).
+  - The FIXED `_archive_reply` archived the reply to `log/` cleanly - NO crash.
+    `connect` returned success.
+- **Confirms**:
+  - **create_collaborator works** (spawn + find + connect + reply).
+  - **B2** (trust flag): a1e02819 reached the REPL with
+    `--dangerously-skip-permissions`, no trust dialog.
+  - **B3** (spawned CC my_session_id): a1e02819 knew its sid.
+  - **B4** (connect end-to-end): hello -> reply -> succeed, single machine.
+  - All 3 T12 fixes validated end-to-end.
+- **Caveat**: the re-test was via script, not the MCP tool (the MCP server
+  process caches the old `user_functions.py`). For future MCP-tool
+  create_collaborator calls to use the fix, the MCP server must reload
+  (`/reload-plugins` or CC restart) - which previously disrupted session
+  tracking, so it was avoided here.
+- **Leftover state**: two stray CCs from earlier attempts - 45e9bb6e (old, idle,
+  its connect timed out) and a1e02819 (this test, alive + connected to
+  81e4c033). Close 45e9bb6e's window; a1e02819 is a usable collaborator.
+- **Confidence**: high - create_collaborator + connect end-to-end verified live.
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -257,6 +291,9 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   the target listens + replies.
 - **Expected**: "connect succeed; reply: ...".
 - **Who**: user (drives two CCs) or me driving both.
+- **Update (T13)**: CONFIRMED - connect end-to-end via create_collaborator:
+  81e4c033 connected to spawned a1e02819, hello sent, reply received via
+  send_message, "connect succeed". Single-machine connect fully works.
 
 ### B5 — Cross-realm e2e (Phase 2) + remote wake
 - **What**: WSL CC ↔ host CC connect/send/listen/close; + remote-wake.
@@ -293,7 +330,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | BUG-1, BUG-5 fixes | high | T2/T3/T6 |
 | Local kernel + RPC lifecycle | high | T4/T7 |
 | listen.py local path | high | T5 |
-| connect end-to-end | MEDIUM | T12: spawn->hello->listen chain live; _archive_reply crash fixed; clean connect-succeed re-run pending MCP reload (B4) |
+| connect end-to-end | high | T13: connect succeed end-to-end via create_collaborator (hello->send_message reply->succeed); B4 confirmed |
 | cross-realm (call_remote, wake, handshake) | MEDIUM | code reviewed, WSL->host wake channel verified feasible, but no end-to-end — B5/B7 |
 | JS hook (registrar.js/proc.js) | high | T10 - liveProcs + isClaudeCmd quote bugs fixed; live chain verified |
 | `--resume` SessionStart (#1) | high (Win) / UNKNOWN (WSL) | T11: --resume fires SessionStart confirmed on Windows; WSL untested - B1 |
