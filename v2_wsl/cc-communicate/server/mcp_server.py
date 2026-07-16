@@ -9,9 +9,9 @@ Tools (v2):
   Read-only:     query_session, check_alive, query_conversations   (routed)
   Messaging:     send_message (routed), register_conversation, unregister_conversation, withdraw (local low-level)
   Spawning:      evoke (routed)
-  Listening:     listen -> returns the listen.py command (Amd3)
-  Orchestration: connect, close_connection, create_collaborator
-  Machines:      query_machines
+  Listening:     listen (blocking - call in a loop until close_connection; C2)
+  Orchestration: connect, close_connection (best-effort non-blocking; C1), create_collaborator
+  Machines:      query_machines, help_connect_machines (handshake guide; C4)
 """
 from mcp.server.fastmcp import FastMCP
 
@@ -86,13 +86,15 @@ def evoke(session_id: str) -> str:
 
 
 @mcp.tool()
-def listen(session_id: str, timeout: int = 300) -> dict:
-    """Arm a background listener for messages addressed to session_id. Returns
-    {command, timeout}. Run `command` via Bash(run_in_background=true); the
-    listener prints collected messages as JSON on stdout and exits 0 when one
-    arrives (you get a <task-notification>), or exits 2 on timeout. This replaces
-    the old arm_poller + collect_messages two-step (Amd3)."""
-    return user_functions.listen_command(session_id, timeout)
+def listen(session_id: str, timeout: int = 30) -> list:
+    """BLOCKING: wait up to `timeout` seconds for undelivered messages addressed
+    to session_id, then return them as a list (possibly empty on timeout). CALL
+    THIS IN A LOOP: after it returns, process any messages, then call listen
+    again - keep a listener active at all times while a connection is
+    established. You may stop the loop ONLY after calling close_connection.
+    Never invoke listen.py directly or write your own shell listener - always
+    use this tool."""
+    return user_functions.listen(session_id, timeout)
 
 
 @mcp.tool()
@@ -102,16 +104,20 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     then blocks up to hold_time seconds waiting for the reply. Returns
     'connect succeed; reply: ...' on success, or a 'failed, ...' /
     'connect failed, ...' string on failure. Connect BEFORE calling listen
-    (running a listener during connect can duplicate the reply)."""
+    (running a listener during connect can duplicate the reply). Once connect
+    succeeds the channel is ESTABLISHED: you MUST then call listen in a loop
+    (see the listen tool) and keep it active until you call close_connection."""
     return user_functions.connect(caller_sid, target_sid, hold_time)
 
 
 @mcp.tool()
 def close_connection(session_id: str, toid: str) -> dict:
-    """Close the connection to toid. Drains pending messages addressed to
-    session_id (returns them as delivered_pending), notifies the peer with
-    '[CONNECTION CLOSED by <sid>]', and unregisters. Returns
-    {closed: True, delivered_pending: [...]}."""
+    """Terminate the connection to toid (the ONLY way to stop your listen loop).
+    Best-effort and non-blocking: sends a '[CONNECTION CLOSED by <sid>]' notice
+    and unregisters, then returns {closed: True, ...} immediately - it does not
+    wait for the peer to acknowledge. The peer's listener sees the notice and
+    frees itself. Safe to call even if the peer is unreachable. After this
+    returns you may stop listening and exit."""
     return user_functions.close_connection(session_id, toid)
 
 
@@ -129,6 +135,17 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
 def query_machines() -> dict:
     """Registered peer machines: {id: {type, data_dir, ...}, ...}."""
     return user_functions.query_machines()
+
+
+@mcp.tool()
+def help_connect_machines() -> str:
+    """Step-by-step guide for connecting this machine to a peer (Windows host <->
+    WSL one-time handshake). Call this when the user wants to link machines -
+    e.g. 'help me connect machines', 'connect WSL to host', 'register the other
+    machine'. Returns a playbook; follow it, asking the user clarifications
+    (is the plugin installed on the other machine? its install path?) and driving
+    both sides' handshake scripts yourself via cross-realm exec."""
+    return user_functions.help_connect_machines()
 
 
 if __name__ == "__main__":

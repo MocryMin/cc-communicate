@@ -179,38 +179,44 @@ def _archive_reply(conv_remote, caller, fname, path):
         rpc_client.call_remote(conv_remote, "collect_messages", {"session_id": caller})
 
 
-def _claim_reply(pipe_dir, caller, target, conv_remote):
+def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
     """Scan pipe_dir once for target's reply (a pipe file with toid==caller,
-    fromid==target). Returns the reply content (archiving the file), or None."""
+    fromid==target). Returns the reply content (archiving the file), or None.
+    Stale messages (ts <= hello_ts) are skipped (C3): a prior [CONNECTION CLOSED]
+    notice left in the pipe, or the hello itself, must not be mistaken for the
+    reply (the hello and any close notice predate the hello we just sent)."""
     for fname, path in _scan_pipe(pipe_dir, caller):
         parsed = conversations.parse_pipe_filename(fname)
         if not parsed or parsed[1] != target:
             continue  # not from target
+        if parsed[0] <= hello_ts:
+            continue  # C3: stale (not newer than the hello) - skip
         try:
             with open(path, encoding="utf-8") as f:
                 content = f.read()
-        except OSError:
-            continue
+        except (OSError, UnicodeDecodeError):
+            continue  # C5: skip malformed/undecodable files
         _archive_reply(conv_remote, caller, fname, path)
         return content
     return None
 
 
-def _poll_reply(caller, target, hold_time, conv_remote):
+def _poll_reply(caller, target, hold_time, conv_remote, hello_ts=0):
     """Block up to hold_time scanning (in-process) for target's reply (a pipe
     file with toid==caller, fromid==target). Returns the reply content, or None
     on timeout. Reads content BEFORE archiving (Amd2: no false-timeout even if a
     stray listener races us). A final scan after the deadline catches a reply
-    that landed in the last poll window. (T15)"""
+    that landed in the last poll window. (T15) hello_ts filters stale messages
+    (C3)."""
     pipe_dir = _pipe_dir_for(caller, target, conv_remote)
     deadline = time.time() + hold_time
     while time.time() < deadline:
-        reply = _claim_reply(pipe_dir, caller, target, conv_remote)
+        reply = _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts)
         if reply is not None:
             return reply
         time.sleep(0.5)
     # final scan: a reply may have landed in the last 0.5s poll window. (T15)
-    return _claim_reply(pipe_dir, caller, target, conv_remote)
+    return _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts)
 
 
 # ---------- tools ----------
@@ -277,14 +283,17 @@ def evoke(session_id: str) -> str:
     return rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
 
 
-def listen_command(session_id: str, timeout: int = 300) -> dict:
-    """Return the command CC should run in the background to listen for messages
-    addressed to session_id (Amd3/#5 - CC never constructs the path itself).
-    Run via Bash(run_in_background=true); listen.py prints messages JSON on
-    stdout and exits 0, or exits 2 on timeout."""
-    script = os.path.join(PLUGIN_ROOT, "server", "listen.py")
-    cmd = f'{sys.executable} "{script}" "{session_id}" "{timeout}"'
-    return {"command": cmd, "timeout": timeout}
+def listen(session_id: str, timeout: int = 30) -> list:
+    """BLOCKING listen (C2): poll up to `timeout` seconds for undelivered messages
+    addressed to session_id (local + peer conversations), archive + return them as
+    a list (possibly empty on timeout). Call this IN A LOOP: after it returns,
+    process any messages, then call listen again - keep a listener active at all
+    times while a connection is established. Stop the loop ONLY by calling
+    close_connection. The poll runs inside the MCP server process - no background
+    shell, no direct listen.py invocation by the CC (that was the failure mode:
+    MSYS path mangling, exit-1 crashes, stray processes, off-script bash loops)."""
+    import listen as _listen
+    return _listen.listen_blocking(session_id, float(timeout))
 
 
 def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
@@ -334,9 +343,16 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
         if init_connect:
             _withdraw(caller_sid, target_sid, 1, conv_remote)
         return "failed, send hello: " + str(send_res)
+    # Parse the hello's timestamp so _poll_reply can reject stale messages (C3):
+    # a prior [CONNECTION CLOSED] notice or the hello itself must not be read as
+    # the reply. send_res looks like "message_sent at <ts_ms>".
+    try:
+        hello_ts = int(str(send_res).rsplit("at ", 1)[1])
+    except (ValueError, IndexError):
+        hello_ts = 0
 
     # 6. in-process poll for the reply (Amd2 - no listener subprocess)
-    reply = _poll_reply(caller_sid, target_sid, hold_time, conv_remote)
+    reply = _poll_reply(caller_sid, target_sid, hold_time, conv_remote, hello_ts)
     if reply is not None:
         return "connect succeed; reply: " + reply
 
@@ -346,12 +362,34 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
 
 
 def close_connection(session_id: str, toid: str) -> dict:
-    """Close the connection to toid. Drains pending addressed to session_id,
-    notifies the peer, unregisters. Routes to the conv store."""
+    """Close the connection to toid (C1: best-effort, non-blocking terminate).
+    Sends a [CONNECTION CLOSED] notice, unregisters, returns success. On a
+    cross-machine conv the notice + unregister are FIRE-AND-FORGET so a dead/slow
+    peer kernel never blocks the caller; locally the calls are fast kernel RPCs.
+    Never raises - a failure here doesn't prevent the caller from leaving. The
+    peer's listener (kept alive via the listen loop) sees the notice and frees
+    itself; no ack is needed."""
     conv_remote = _conv_store(toid)
-    pending = _collect(session_id, conv_remote)
-    _send(session_id, toid, "[CONNECTION CLOSED by " + session_id + "]", conv_remote)
-    _unregister(session_id, toid, conv_remote)
+    notice = "[CONNECTION CLOSED by " + session_id + "]"
+    pending = None
+    try:
+        if conv_remote is None:
+            # local: fast kernel RPCs; drain pending addressed to the caller.
+            pending = rpc_client.call("collect_messages", {"session_id": session_id})
+            rpc_client.call("send_message",
+                            {"fromid": session_id, "toid": toid, "message": notice})
+            rpc_client.call("unregister_conversation",
+                            {"sid_a": session_id, "sid_b": toid})
+        else:
+            # remote: fire-and-forget so a dead peer kernel never blocks us.
+            rpc_client.submit_remote_noblock(
+                conv_remote, "send_message",
+                {"fromid": session_id, "toid": toid, "message": notice})
+            rpc_client.submit_remote_noblock(
+                conv_remote, "unregister_conversation",
+                {"sid_a": session_id, "sid_b": toid})
+    except Exception:
+        pass  # best-effort: never block the caller's exit on a notify/unregister failure
     return {"closed": True, "delivered_pending": pending}
 
 
@@ -364,10 +402,14 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
     # races _poll_reply. See T15. (hold_time default 300 == the floor.)
     hold_time = max(hold_time, _MIN_HOLD_TIME)
     prompt = ("You are a new collaborator spawned by cc-communicate. "
-              "First call my_session_id to learn your id. Then call listen and "
-              "run the returned command in the background. When a peer sends you "
-              "a hello, reply with send_message(your_id, peer_id, <message>) - "
-              "do NOT call connect to reply.")
+              "First call my_session_id to learn your id. Then call listen (it "
+              "blocks and returns messages addressed to you). When a peer sends "
+              "you a hello, reply with send_message(your_id, peer_id, <message>) "
+              "- do NOT call connect to reply. KEEP LISTENING: after each listen "
+              "call returns, process any messages and call listen again, in a "
+              "loop, until you call close_connection to end the conversation. "
+              "Never invoke listen.py directly, never write a shell loop, never "
+              "nohup a listener - only use the listen tool.")
     since_ts = int(time.time() * 1000)
     if machine is None:
         spawn.spawn_cc_new(cwd, prompt)
@@ -391,3 +433,17 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
 def query_machines() -> dict:
     """Registered peer machines: {id: entry, ...}."""
     return {m.get("id"): m for m in read_machine_info_log()}
+
+
+def help_connect_machines() -> str:
+    """Return the cross-machine handshake playbook (C4). The CC calls this when
+    the user wants to link this machine to a peer (e.g. 'help me connect
+    machines', 'connect WSL to host', 'register the other machine'), then follows
+    the steps - asking clarifications and driving both sides' handshake scripts
+    itself (cross-realm exec, like _wake_remote)."""
+    guide_path = os.path.join(PLUGIN_ROOT, "server", "handshake_guide.md")
+    try:
+        with open(guide_path, encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        return "handshake guide not found at %s: %s" % (guide_path, e)

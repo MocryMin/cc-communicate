@@ -88,8 +88,8 @@ def _archive_local(cands, sid):
         try:
             with open(path, encoding="utf-8") as f:
                 content = f.read()
-        except OSError:
-            continue
+        except (OSError, UnicodeDecodeError):
+            continue  # C5: skip malformed/undecodable files instead of crashing
         parsed = conversations.parse_pipe_filename(fname)
         messages.append({
             "time": parsed[0] if parsed else 0,
@@ -105,12 +105,12 @@ def _archive_local(cands, sid):
     return messages
 
 
-def main():
-    if len(sys.argv) < 2:
-        sys.stderr.write("usage: listen.py <session_id> [timeout]\n")
-        sys.exit(2)
-    sid = sys.argv[1]
-    timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
+def listen_blocking(sid: str, timeout: float = 30.0) -> list:
+    """Block up to `timeout` seconds scanning for undelivered messages addressed
+    to sid (local + peer conversations). On finding any, settle 3s (defend against
+    a writer mid-write), archive + read them, return the list. On timeout return
+    []. Used by the blocking `listen` MCP tool (C2): the CC calls this in a loop -
+    no background process, no bash, the poll runs in the MCP server process."""
     deadline = time.time() + timeout
     peers = _peer_conv_roots()
 
@@ -137,12 +137,31 @@ def main():
                 except Exception:
                     pass
             messages.sort(key=lambda m: m.get("time", 0))
-            print(json.dumps(messages, ensure_ascii=False))
-            sys.exit(0)
+            return messages
 
         if time.time() >= deadline:
-            sys.exit(2)
+            return []
         time.sleep(POLL)
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: listen.py <session_id> [timeout]\n")
+        sys.exit(2)
+    sid = sys.argv[1]
+    timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
+    # UTF-8 stdout so non-ASCII messages don't crash print on Windows (C5): the
+    # default pipe encoding (cp936/cp1252) can't encode many chars, and a
+    # UnicodeEncodeError on print was the exit-1 crash seen in live testing.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    messages = listen_blocking(sid, timeout)
+    if messages:
+        print(json.dumps(messages, ensure_ascii=False))
+        sys.exit(0)
+    sys.exit(2)
 
 
 if __name__ == "__main__":

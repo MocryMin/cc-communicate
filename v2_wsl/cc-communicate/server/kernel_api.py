@@ -145,9 +145,13 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
         return "failed, session unknown"
     if prompt is None:
         prompt = ("You have been revived for p2p communication by cc-communicate. "
-                  "Call my_session_id to learn your id, then call listen and run "
-                  "the returned command in the background, and reply to any hello "
-                  "from peer sessions using send_message(your_id, peer_id, <message>).")
+                  "Call my_session_id to learn your id, then call listen (it blocks "
+                  "and returns messages addressed to you) and reply to any hello "
+                  "from peer sessions using send_message(your_id, peer_id, <message>). "
+                  "KEEP LISTENING: after each listen call returns, process any "
+                  "messages and call listen again, in a loop, until you call "
+                  "close_connection. Never invoke listen.py directly or write a "
+                  "shell listener - only use the listen tool.")
     spawn.spawn_cc_resume(session_id, prompt)
     return "evoke spawned (resumed)"
 
@@ -196,8 +200,8 @@ def collect_messages(session_id: str) -> list:
             try:
                 with open(os.path.join(pipe, fname), encoding="utf-8") as f:
                     content = f.read()
-            except OSError:
-                continue
+            except (OSError, UnicodeDecodeError):
+                continue  # C5: skip malformed/undecodable files instead of crashing
             result.append({"time": ts, "from_id": fr, "message": content})
             os.makedirs(log, exist_ok=True)
             try:

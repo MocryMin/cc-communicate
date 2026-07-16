@@ -27,6 +27,7 @@ MACHINE_INFO_LOG_DIR = os.path.join(DATA_DIR, 'machine_info_log')  # registered 
 
 CORE_STATUS_FILE    = os.path.join(SERVER_DATA_DIR, 'core_status.json')
 SESSIONS_FILE       = os.path.join(SERVER_DATA_DIR, 'sessions.json')  # persistent session registry
+ALIVE_CONVS_FILE    = os.path.join(SERVER_DATA_DIR, 'alive_conversations.json')  # persistent conv registrations (R2)
 MACHINE_IDENTITY_FILE = os.path.join(SERVER_DATA_DIR, 'machine_identity.json')  # this machine's {type, id, claude_bin}
 TERMINATE_FLAG = os.path.join(SERVER_DATA_DIR, 'terminate.flag')  # kernel_terminate signal (kernel loop checks this)
 

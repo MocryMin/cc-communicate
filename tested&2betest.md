@@ -314,6 +314,102 @@ expected result). Also see `log/implementation-log.md` for raw output.
 - **Confidence**: high; the WSL CC must reload (MCP restart) to pick up the fix
   + regenerate its identity as wsl-ubuntu.
 
+### T17 - C3 ts-filter: stale close-notice / self-connect read as reply
+- **Bug**: `_claim_reply`/`_poll_reply` accepted ANY pipe message from the target
+  as the reply. If a prior `close_connection(B,A)` left a `[CONNECTION CLOSED by
+  B]` notice in A's pipe (A wasn't listening when it arrived), a later
+  `connect(A,B)` would read that stale notice as B's reply -> **false success**
+  (B never replied). Also `connect(A,A)` read its own hello as the reply.
+- **Fix**: `connect` parses the hello's ts from `_send`'s `"message_sent at <ts>"`
+  return; `_claim_reply` skips messages with `ts <= hello_ts` (the hello and any
+  prior close notice predate the hello, so they're filtered).
+- **Method**: unit test - fabricated stale (ts=1000) + fresh (ts=3000) pipe files
+  with hello_ts=2000 -> stale skipped + left in pipe, fresh returned; self-connect
+  hello (ts==hello_ts) rejected (None).
+- **Confidence**: high (logic + unit test). Pending live re-verification.
+
+### T18 - C2 blocking `listen` (listen-returns-a-command failure mode)
+- **Bug (from 2 real-scene tests)**: the `listen` tool returned a shell command
+  for the CC to run via Bash. The CC fumbled it every way: had to manually add
+  `MSYS_NO_PATHCONV=1` (git-bash mangled the backslash paths), the background
+  `listen.py` crashed (exit 1 - see T19), 5 stray `python.exe` processes
+  accumulated, and the CC went off-script writing a custom `/tmp/cc_listen_loop.sh`
+  bash loop instead of re-arming via the tool. The one-shot `listen.py` also meant
+  the CC stopped listening after one delivery -> the keep-listen law was
+  unenforceable (the collaborator never received the 2nd question).
+- **Fix**: `listen` is now a BLOCKING MCP tool - it runs the poll inside the MCP
+  server (`listen.listen_blocking`) and returns the messages list (or `[]` on
+  timeout). The CC calls it in a loop until `close_connection`. No bash, no
+  background process, no strays. The "wake" = the tool returning. The
+  `create_collaborator`/`evoke` prompts + `connect`/`listen`/`close_connection`
+  tool descriptions now carry the keep-listen law + an explicit anti-bash-loop
+  rule ("never invoke listen.py directly, never write a shell listener").
+- **Method**: unit test (`listen_blocking` returns messages addressed to sid;
+  `[]` on timeout). py_compile + parity (v2_win==v2_wsl except .mcp.json).
+- **Confidence**: high for the mechanism. Pending live verification; gate = does
+  Claude Code tolerate a ~30s blocking MCP tool call (very likely yes - the per-
+  call default is 30s).
+
+### T19 - C5 listen.py exit-1 UTF-8 crash
+- **Bug (from real-scene test 1)**: background `listen.py` exited 1 (crash). Root
+  cause: `print(json.dumps(messages, ensure_ascii=False))` on a non-UTF-8 stdout
+  pipe (cp936/cp1252 on Chinese Windows) raised `UnicodeEncodeError` when a
+  message held non-ASCII. (Foreground re-run had no message to print -> clean
+  exit 2, matching the observed pattern.) Also `_archive_local`'s read only caught
+  `OSError`, not `UnicodeDecodeError` (a malformed pipe file -> crash).
+- **Fix**: `listen.py` `main()` reconfigures stdout to UTF-8
+  (`sys.stdout.reconfigure(encoding="utf-8")`); `_archive_local`, `_claim_reply`,
+  and `collect_messages` catch `UnicodeDecodeError` alongside `OSError` (skip
+  malformed files).
+- **Method**: unit test - a non-UTF-8 pipe file is skipped, the good message
+  after it is returned, no crash.
+- **Confidence**: high (matches the exit-1-background / exit-2-foreground
+  pattern). Pending live confirmation.
+
+### T20 - C1 non-blocking best-effort `close_connection`
+- **Issue**: `close_connection` made up to 3 blocking remote calls (`_collect`,
+  `_send`, `_unregister`), each a `call_remote` that can block 10s+ on a dead
+  peer kernel -> terminate blocked 30s+, and a failure could make the caller
+  retry (wasting tokens). Violated the intended "terminate is simple, non-blocking,
+  returns success, caller exits" model.
+- **Fix**: `close_connection` is now best-effort + non-blocking. Remote notice +
+  unregister are fire-and-forget via new `rpc_client.submit_remote_noblock`
+  (submits the request without polling the response); the local path uses fast
+  kernel RPCs (and drains pending for the caller). Wrapped in try/except, always
+  returns `{closed: True}`, never raises. The peer's listener (kept alive per the
+  listen loop) sees the notice and frees itself - no ack needed.
+- **Method**: py_compile + logic review + parity. (Live test pending.)
+- **Confidence**: high (logic is simple).
+
+### T21 - R2 persist `alive_conversations` across kernel restart
+- **Bug**: `alive_conversations` was in-memory only -> a kernel restart (crash /
+  idle-timeout exit / terminate) dropped ALL conversation registrations ->
+  subsequent `send_message` returned `failed, connection not registered` for every
+  active conversation.
+- **Fix**: kernel persists `alive_conversations` to `alive_conversations.json`
+  (list of `[a,b,info]`; tuple keys aren't JSON-serializable). `_load_alive_convs`
+  on startup, `_save_alive_convs` after `drain_queue` (when the queue was busy)
+  and on exit.
+- **Method**: unit test - round-trip 2 convs (save -> clear -> load -> equal);
+  empty round-trip. py_compile + parity.
+- **Confidence**: high (logic + unit test). Pending live restart test.
+
+### T22 - C4 handshake guide + `help_connect_machines`
+- **Gap**: a fresh WSL install cannot discover the host (no auto-discovery);
+  cross-realm silently fails (`target session not exists`) until the manual
+  handshake is run, with no guidance for the CC.
+- **Fix**: added `server/handshake_guide.md` (playbook: clarify prerequisites,
+  identify side, drive BOTH scripts via cross-realm exec - like `_wake_remote` -
+  with the git-bash path-mangling caveat baked in, verify via `query_machines`,
+  diagnose failures) + `help_connect_machines` MCP tool that reads + returns it.
+  The CC calls the tool on "help me connect machines" prompts and follows the
+  guide, asking the user clarifications and orchestrating both sides itself.
+- **Method**: guide files present + identical in both trees (66 lines);
+  `help_connect_machines` reads + returns the guide. (Live orchestration test
+  pending.)
+- **Confidence**: medium (design sound; cross-realm exec feasibility already
+  proven by Amd8 wake; the guide's steps + path-mangling caveat need a live run).
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -428,3 +524,15 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | `--resume` SessionStart (#1) | high (Win + WSL) | T11 (Win) + WSL report: --resume fires SessionStart on both realms; B1 confirmed |
 | cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
 | trust flag (#6) | high | T12 (Win) + WSL report: spawned CCs reach REPL with --dangerously-skip-permissions on both realms |
+| connect reply matching (C3) | high (unit) | T17 - ts-filter rejects stale close-notice + self-connect hello; unit-tested, pending live |
+| blocking listen + keep-listen law (C2) | high (unit) | T18 - listen is now a blocking tool (no bash/strays/exit-1); unit-tested, pending live (gate: 30s blocking MCP call) |
+| listen.py UTF-8 / decode hardening (C5) | high (unit) | T19 - stdout UTF-8 + UnicodeDecodeError skip; matches exit-1-bg/exit-2-fg pattern; pending live |
+| non-blocking terminate (C1) | high (logic) | T20 - close_connection fire-and-forget remote, always succeeds; pending live |
+| conv registration persistence (R2) | high (unit) | T21 - alive_conversations.json survives restart; unit-tested, pending live restart |
+| handshake guide + tool (C4) | medium | T22 - guide + help_connect_machines in both trees; cross-realm exec proven by Amd8; pending live orchestration |
+
+> **Note (post-v0.2.0 robustness pass):** C1/C2/C3/C5/R2 are **implemented +
+> unit-tested + parity-verified**, but NOT yet live-verified with real CCs. The
+> two real-scene failures (background listen exit-1; collaborator stopped
+> listening + went off-script to a bash loop) drove C2/C5. Live re-runs of the
+> multi-round conversation + a kernel-restart-during-conv test are the next gate.

@@ -172,3 +172,19 @@ def call_remote(machine: dict, function: str, args: dict | None = None,
         if attempt == 1:
             _wake_remote(machine)  # kernel likely dead -> wake + retry
     return None
+
+
+def submit_remote_noblock(machine: dict, function: str, args: dict | None = None):
+    """Fire-and-forget: submit a request to the remote queue WITHOUT polling for a
+    response. For best-effort operations (close_connection, C1) where the caller
+    must not block on a dead/slow peer. The remote kernel processes the request
+    whenever it can; if it never does, the request file is harmless residue. Never
+    raises - a remote write failure is swallowed (best-effort)."""
+    if args is None:
+        args = {}
+    ensure_runtime_dirs()
+    try:
+        rqueue = os.path.join(machine["data_dir"], "queue")
+        _submit_remote(rqueue, function, args)
+    except Exception:
+        pass  # best-effort; never block/raise on a remote write failure

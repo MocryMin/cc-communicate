@@ -29,7 +29,7 @@ import machine_identity
 from paths import (
     CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
-    ensure_runtime_dirs,
+    ALIVE_CONVS_FILE, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
@@ -81,6 +81,28 @@ def _load_sessions():
 
 def _save_sessions():
     _atomic_write_json(SESSIONS_FILE, sessions)
+
+
+def _load_alive_convs():
+    """Reload registered conversations from disk (R2). alive_conversations is
+    otherwise in-memory and would be lost on every kernel restart (crash / idle
+    exit / terminate), breaking all in-flight send_message calls. Persisted as a
+    list of [a, b, info] (tuple keys aren't JSON-serializable); the pair is
+    already canonical (sorted) when stored."""
+    data = _read_json(ALIVE_CONVS_FILE)
+    if not isinstance(data, list):
+        return
+    for entry in data:
+        if isinstance(entry, list) and len(entry) >= 2:
+            a, b = entry[0], entry[1]
+            info = entry[2] if len(entry) > 2 and isinstance(entry[2], dict) else {}
+            alive_conversations[(a, b)] = info
+    log.info("loaded alive_conversations.json: %d convs", len(alive_conversations))
+
+
+def _save_alive_convs():
+    data = [[a, b, info] for (a, b), info in alive_conversations.items()]
+    _atomic_write_json(ALIVE_CONVS_FILE, data)
 
 
 def process_session_ctrl_event() -> bool:
@@ -265,6 +287,7 @@ def main():
              os.getpid(), _local_machine_type, _IDLE_TIMEOUT)
 
     _load_sessions()
+    _load_alive_convs()
     process_session_ctrl_event()
     _write_core_status(1)
     log.info("kernel READY - %d sessions known, %d alive", len(sessions), len(alive_sessions))
@@ -278,6 +301,7 @@ def main():
             q_busy = drain_queue()
             if q_busy:
                 _last_activity = time.monotonic()
+                _save_alive_convs()  # R2: register/unregister/withdraw may have changed it
             if ev_busy or q_busy:
                 sleep = _BASE_SLEEP
                 idle = 0
@@ -300,6 +324,7 @@ def main():
         log.info("kernel exiting - writing status=0, saving sessions.json")
         _write_core_status(0)
         _save_sessions()
+        _save_alive_convs()
         log.info("kernel exited")
 
 
