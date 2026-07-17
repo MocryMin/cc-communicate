@@ -37,6 +37,10 @@ _REVIVE_WAIT = 30.0
 # T15); a shorter hold_time races _poll_reply's deadline and misses the
 # reply by milliseconds. (T15)
 _MIN_HOLD_TIME = 300
+# T24: listen polls the kernel's atomic listen_scan at this interval. With the
+# kernel's _MAX_SLEEP cut to 0.2s (B5), each poll returns within ~0.2s; this
+# interval sets the message-pickup granularity.
+_LISTEN_POLL = 1.0
 
 
 # ---------- machine registry helpers ----------
@@ -283,17 +287,46 @@ def evoke(session_id: str) -> str:
     return rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
 
 
-def listen(session_id: str, timeout: int = 30) -> list:
-    """BLOCKING listen (C2): poll up to `timeout` seconds for undelivered messages
-    addressed to session_id (local + peer conversations), archive + return them as
-    a list (possibly empty on timeout). Call this IN A LOOP: after it returns,
-    process any messages, then call listen again - keep a listener active at all
-    times while a connection is established. Stop the loop ONLY by calling
-    close_connection. The poll runs inside the MCP server process - no background
-    shell, no direct listen.py invocation by the CC (that was the failure mode:
-    MSYS path mangling, exit-1 crashes, stray processes, off-script bash loops)."""
-    import listen as _listen
-    return _listen.listen_blocking(session_id, float(timeout))
+def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
+    """BLOCKING listen with timestamp ACK (T24). Polls the kernel's atomic
+    listen_scan: archives (to==session_id, ts<=acked_ts) [messages you already
+    confirmed] and returns newer messages + a new watermark. CALL THIS IN A
+    LOOP: pass the returned `watermark` as `acked_ts` on the next call. Cancel-
+    safe - a cancelled listen archived only what you'd already confirmed in a
+    prior call; the just-returned messages stay in the pipe and re-deliver next
+    time. Cross-realm: a WSL caller also scans the host (where cross-machine
+    convs live). Never invoke listen.py directly or write a shell listener."""
+    deadline = time.time() + timeout
+    host = _host_entry()  # None when we ARE the host -> all our convs are local
+    while time.time() < deadline:
+        messages = []
+        watermark = acked_ts
+        # local atomic scan (kernel single-thread -> no concurrent writes)
+        try:
+            r = rpc_client.call("listen_scan", {"sid": session_id, "acked_ts": acked_ts})
+        except Exception:
+            r = None  # transient kernel issue -> treat as empty, retry
+        if isinstance(r, dict):
+            if r.get("messages"):
+                messages.extend(r["messages"])
+            wm = r.get("watermark", acked_ts)
+            if wm > watermark:
+                watermark = wm
+        # cross-realm: a WSL caller's cross-machine convs are stored on the host
+        if host is not None:
+            rr = rpc_client.call_remote(host, "listen_scan",
+                                        {"sid": session_id, "acked_ts": acked_ts})
+            if isinstance(rr, dict):
+                if rr.get("messages"):
+                    messages.extend(rr["messages"])
+                wm = rr.get("watermark", acked_ts)
+                if wm > watermark:
+                    watermark = wm
+        if messages:
+            messages.sort(key=lambda x: x.get("time", 0))
+            return {"messages": messages, "watermark": watermark}
+        time.sleep(_LISTEN_POLL)
+    return {"messages": [], "watermark": acked_ts}
 
 
 def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
@@ -361,27 +394,33 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     return "connect failed, timeout waiting for reply"
 
 
-def close_connection(session_id: str, toid: str) -> dict:
-    """Close the connection to toid (C1: best-effort, non-blocking terminate).
-    Sends a [CONNECTION CLOSED] notice, unregisters, returns success. On a
-    cross-machine conv the notice + unregister are FIRE-AND-FORGET so a dead/slow
-    peer kernel never blocks the caller; locally the calls are fast kernel RPCs.
-    Never raises - a failure here doesn't prevent the caller from leaving. The
-    peer's listener (kept alive via the listen loop) sees the notice and frees
-    itself; no ack is needed."""
+def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
+    """Close the connection to toid (T24: best-effort, non-blocking). Uploads
+    the caller's latest ACK watermark to the kernel (persisted, so it survives
+    compact/restart - the CC can recover it via query_my_ACK_timestamp), sends
+    a close notice to the peer (with an instruction to upload its own ts), and
+    unregisters. Does NOT clean up the pipe - per the ts-based ACK design,
+    un-acked messages stay and are archived lazily via the watermark on the next
+    listen (or removed by withdraw). Never raises - a failure here doesn't
+    prevent the caller from leaving."""
     conv_remote = _conv_store(toid)
-    notice = "[CONNECTION CLOSED by " + session_id + "]"
-    pending = None
+    notice = ("[CONNECTION CLOSED by " + session_id + "] To close your side and "
+              "preserve your message state, call close_connection(your_sid, " +
+              session_id + ", your_latest_ACK_ts). If you have lost your ts, call "
+              "query_my_ACK_timestamp(your_sid) first, then close_connection.")
+    # 1. upload the caller's watermark to the home kernel (persisted)
+    try:
+        rpc_client.call("upload_ack_timestamp", {"sid": session_id, "ts": acked_ts})
+    except Exception:
+        pass
+    # 2. notify the peer + unregister (fire-and-forget if the conv is remote)
     try:
         if conv_remote is None:
-            # local: fast kernel RPCs; drain pending addressed to the caller.
-            pending = rpc_client.call("collect_messages", {"session_id": session_id})
             rpc_client.call("send_message",
                             {"fromid": session_id, "toid": toid, "message": notice})
             rpc_client.call("unregister_conversation",
                             {"sid_a": session_id, "sid_b": toid})
         else:
-            # remote: fire-and-forget so a dead peer kernel never blocks us.
             rpc_client.submit_remote_noblock(
                 conv_remote, "send_message",
                 {"fromid": session_id, "toid": toid, "message": notice})
@@ -390,7 +429,18 @@ def close_connection(session_id: str, toid: str) -> dict:
                 {"sid_a": session_id, "sid_b": toid})
     except Exception:
         pass  # best-effort: never block the caller's exit on a notify/unregister failure
-    return {"closed": True, "delivered_pending": pending}
+    return {"closed": True}
+
+
+def query_my_ACK_timestamp(session_id: str) -> int:
+    """Recover the kernel's stored ACK watermark for session_id (T24). Call this
+    after a compact / long gap / kernel restart if you've lost your latest ts,
+    then use the returned value as `acked_ts` on your next listen."""
+    try:
+        r = rpc_client.call("query_ack_timestamp", {"sid": session_id})
+    except Exception:
+        r = 0
+    return r if isinstance(r, int) else 0
 
 
 def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
@@ -402,12 +452,19 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
     # races _poll_reply. See T15. (hold_time default 300 == the floor.)
     hold_time = max(hold_time, _MIN_HOLD_TIME)
     prompt = ("You are a new collaborator spawned by cc-communicate. "
-              "First call my_session_id to learn your id. Then call listen (it "
-              "blocks and returns messages addressed to you). When a peer sends "
-              "you a hello, reply with send_message(your_id, peer_id, <message>) "
-              "- do NOT call connect to reply. KEEP LISTENING: after each listen "
-              "call returns, process any messages and call listen again, in a "
-              "loop, until you call close_connection to end the conversation. "
+              "First call my_session_id to learn your id. Then call listen "
+              "(your_id, acked_ts, timeout) - it blocks and returns "
+              "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
+              "every later listen pass the watermark the previous listen "
+              "returned (this lets the kernel archive only what you've "
+              "confirmed - never drop or duplicate it). When a peer sends you "
+              "a hello, reply with send_message(your_id, peer_id, <message>) "
+              "- do NOT call connect to reply. KEEP LISTENING: after each "
+              "listen returns, process any messages and call listen again "
+              "(with the latest watermark), in a loop, until you call "
+              "close_connection(your_id, peer_id, your_latest_watermark) to "
+              "end the conversation. If you ever lose your watermark (compact / "
+              "long gap), call query_my_ACK_timestamp(your_id) to recover it. "
               "Never invoke listen.py directly, never write a shell loop, never "
               "nohup a listener - only use the listen tool.")
     since_ts = int(time.time() * 1000)

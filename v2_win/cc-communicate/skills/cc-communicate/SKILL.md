@@ -13,6 +13,27 @@ new collaborator sessions. Works within one machine AND across the Windows host
 CC exposes each tool as `mcp__plugin_cc-communicate_cc-communicate__<tool>`;
 call them by the short names below.
 
+## The ACK watermark (read this before listening)
+
+`listen` uses a **timestamp ACK** so an interrupted listen never loses messages.
+You keep one number - the `watermark` - and pass it back on each listen:
+
+- **First listen**: call `listen(sid, 0, timeout)` (acked_ts = 0).
+- It returns `{messages, watermark}`. The `watermark` is the max timestamp of the
+  returned messages (or 0 if none).
+- **Next listen**: pass that `watermark` as `acked_ts`. The kernel archives only
+  messages you've confirmed (ts ≤ acked_ts) and returns newer ones.
+- **If you lose the watermark** (compact / long gap / restart): call
+  `query_my_ACK_timestamp(sid)` to recover it from the kernel, then use it as
+  `acked_ts`.
+- **On close**: pass your latest watermark to `close_connection` so the kernel
+  persists it.
+
+Why: the kernel only archives what you've *confirmed* (via the watermark you
+pass back), never what it merely handed you. So a cancelled/interrupted listen
+archived nothing of yours - the messages re-deliver next time. No more silent
+loss when a human interrupts mid-conversation.
+
 ## Quick start (typical p2p flow)
 
 1. **Get your own session_id** - call `my_session_id()` first. You need this sid
@@ -29,13 +50,13 @@ call them by the short names below.
    `"connect succeed; reply: ..."` on success. **Connect BEFORE listening.**
 
 4. **Send + listen** - `send_message(fromid, toid, message)` writes to the
-   peer's pipe. To wait for replies: `listen(sid)` returns a `command`; run it
-   via `Bash(run_in_background=true)`. The listener prints collected messages as
-   JSON on stdout and exits 0 when one arrives (you get a `<task-notification>`),
-   or exits 2 on timeout. Then process, reply, and re-listen.
+   peer's pipe. To receive: `listen(sid, acked_ts, timeout)` BLOCKS (in the MCP
+   server) and returns `{messages, watermark}`. Process the messages, then call
+   `listen` again with the new watermark. Keep this loop going until you close.
 
-5. **Close** - `close_connection(sid, toid)` drains your pending messages,
-   notifies the peer with `[CONNECTION CLOSED by <sid>]`, and unregisters.
+5. **Close** - `close_connection(sid, toid, acked_ts)` uploads your watermark
+   (persisted), sends a `[CONNECTION CLOSED by <sid>]` notice to the peer (which
+   tells it to upload its own ts), and unregisters. Pass your latest watermark.
 
 6. **Spawn a collaborator** - `create_collaborator(sid, cwd)` starts a NEW CC in
    `cwd` (on this machine), waits for it to register, then connects. Pass
@@ -70,20 +91,24 @@ call them by the short names below.
   on (local or remote peer). Same session_id resumed. connect calls this
   automatically when the target is dead.
 
-### Listening
-- `listen(session_id, timeout=300) -> dict` - Returns `{command, timeout}`. Run
-  `command` via `Bash(run_in_background=true)`; the listener prints messages
-  JSON on stdout and exits 0 on arrival (you get a `<task-notification>`), or 2
-  on timeout. Then process and re-listen. (Replaces the old arm_poller +
-  collect_messages two-step.)
+### Listening (timestamp ACK - see "The ACK watermark" above)
+- `listen(session_id, acked_ts=0, timeout=30) -> dict` - BLOCKING. Returns
+  `{messages, watermark}`. Pass 0 the first time; pass the returned `watermark`
+  on every later call. The kernel's scan is atomic (single-threaded) and
+  archives only what you've confirmed (ts ≤ acked_ts) - an interrupted listen
+  loses nothing. Call in a loop until `close_connection`.
+- `query_my_ACK_timestamp(session_id) -> int` - Recover your latest watermark
+  from the kernel after a compact / long gap / restart. Use it as `acked_ts`.
 
 ### Orchestration
 - `connect(caller_sid, target_sid, hold_time=300) -> str` - Establish p2p (local
   or cross-realm). Query -> check_alive -> evoke+wait if dead -> register ->
   send hello -> in-process wait for reply. Returns `"connect succeed; reply:
   ..."` or a `"failed, ..."` / `"connect failed, ..."` string.
-- `close_connection(session_id, toid) -> dict` - Drains pending (returns
-  `delivered_pending`), sends `[CONNECTION CLOSED by <sid>]`, unregisters.
+- `close_connection(session_id, toid, acked_ts=0) -> dict` - Uploads your
+  watermark (persisted), sends the close notice (telling the peer to upload its
+  ts), unregisters. Does NOT clean up the pipe (ts-based ACK). Returns
+  `{closed: True}`.
 - `create_collaborator(caller_sid, cwd, hold_time=300, machine=None) -> str` -
   Spawn a NEW CC in cwd (on `machine` if given, else local), poll until
   registered, then connect.
@@ -91,6 +116,8 @@ call them by the short names below.
 ### Machines (cross-realm)
 - `query_machines() -> dict` - Registered peer machines: `{id: {type, data_dir,
   ...}, ...}`. Empty until machine registration is done.
+- `help_connect_machines() -> str` - Step-by-step guide for the one-time
+  host ↔ WSL handshake.
 
 ## Cross-realm (Windows host ↔ WSL2)
 
@@ -99,7 +126,8 @@ To talk across the host/WSL boundary, register the two machines once:
    listening...").
 2. On **WSL**: `python3 .../server/machine_sign_up.py` (prints "success!").
 After that, `query_session`/`check_alive`/`connect`/`send_message` automatically
-fan out to the peer machine. Cross-machine messages live on the host.
+fan out to the peer machine. Cross-machine messages live on the host. A WSL
+caller's `listen` also scans the host (where its cross-machine convs live).
 
 ## Caveats
 
@@ -108,12 +136,15 @@ fan out to the peer machine. Cross-machine messages live on the host.
 - **Call `my_session_id` first.** You need your own sid before connect /
   send_message / close_connection / create_collaborator.
 - **`connect` blocks.** Up to `hold_time` (default 300s) waiting for the reply.
-- **Connect BEFORE listen.** Running a background listener while connect is in
-  progress can duplicate the reply. Connect first (it confirms the handshake),
-  then `listen` for ongoing messages.
-- **Run the listener in the background.** `listen` returns a `command`; run it
-  via `Bash(run_in_background=true)`. You get a `<task-notification>` on exit
-  (0 = message arrived, 2 = timeout).
+- **Connect BEFORE listen.** Connect confirms the handshake; then run the listen
+  loop. (Connect consumes the hello-reply itself.)
+- **Keep the watermark.** `listen` returns `{messages, watermark}`; pass that
+  `watermark` as `acked_ts` on the next listen. If you lose it, call
+  `query_my_ACK_timestamp`. The kernel only archives what you've confirmed, so
+  an interrupted listen is safe - but you must keep passing the watermark
+  forward or messages will re-deliver (harmless duplicates, no loss).
+- **`listen` blocks in the MCP server.** It is NOT a shell command - call it
+  directly as a tool. Do not invoke `listen.py` or write a bash listener.
 - **Spawned CCs run with `--dangerously-skip-permissions`** so they skip the
   workspace-trust dialog (automation agents).
 - **Cross-realm needs registration.** `query_machines()` is empty until

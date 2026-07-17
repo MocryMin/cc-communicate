@@ -9,8 +9,9 @@ Tools (v2):
   Read-only:     query_session, check_alive, query_conversations   (routed)
   Messaging:     send_message (routed), register_conversation, unregister_conversation, withdraw (local low-level)
   Spawning:      evoke (routed)
-  Listening:     listen (blocking - call in a loop until close_connection; C2)
-  Orchestration: connect, close_connection (best-effort non-blocking; C1), create_collaborator
+  Listening:     listen (blocking, timestamp-ACK watermark; poll kernel atomic scan; T24),
+                 query_my_ACK_timestamp (recover the watermark after compact/restart; T24)
+  Orchestration: connect, close_connection (best-effort non-blocking; uploads watermark; T24), create_collaborator
   Machines:      query_machines, help_connect_machines (handshake guide; C4)
 """
 from mcp.server.fastmcp import FastMCP
@@ -86,15 +87,17 @@ def evoke(session_id: str) -> str:
 
 
 @mcp.tool()
-def listen(session_id: str, timeout: int = 30) -> list:
+def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
     """BLOCKING: wait up to `timeout` seconds for undelivered messages addressed
-    to session_id, then return them as a list (possibly empty on timeout). CALL
-    THIS IN A LOOP: after it returns, process any messages, then call listen
-    again - keep a listener active at all times while a connection is
-    established. You may stop the loop ONLY after calling close_connection.
-    Never invoke listen.py directly or write your own shell listener - always
-    use this tool."""
-    return user_functions.listen(session_id, timeout)
+    to session_id, then return `{messages, watermark}` (messages possibly empty
+    on timeout). Pass 0 as acked_ts the FIRST time; on every later call pass the
+    `watermark` the previous listen returned. The kernel archives only messages
+    you've confirmed (ts <= acked_ts) - so a cancelled/interrupted listen never
+    loses messages (they re-deliver next time). CALL THIS IN A LOOP: after it
+    returns, process any messages, then call listen again with the latest
+    watermark - keep a listener active until you call close_connection. Never
+    invoke listen.py directly or write your own shell listener."""
+    return user_functions.listen(session_id, acked_ts, timeout)
 
 
 @mcp.tool()
@@ -106,19 +109,32 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     'connect failed, ...' string on failure. Connect BEFORE calling listen
     (running a listener during connect can duplicate the reply). Once connect
     succeeds the channel is ESTABLISHED: you MUST then call listen in a loop
-    (see the listen tool) and keep it active until you call close_connection."""
+    (passing the watermark each call - see the listen tool) and keep it active
+    until you call close_connection."""
     return user_functions.connect(caller_sid, target_sid, hold_time)
 
 
 @mcp.tool()
-def close_connection(session_id: str, toid: str) -> dict:
+def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
     """Terminate the connection to toid (the ONLY way to stop your listen loop).
-    Best-effort and non-blocking: sends a '[CONNECTION CLOSED by <sid>]' notice
-    and unregisters, then returns {closed: True, ...} immediately - it does not
-    wait for the peer to acknowledge. The peer's listener sees the notice and
-    frees itself. Safe to call even if the peer is unreachable. After this
-    returns you may stop listening and exit."""
-    return user_functions.close_connection(session_id, toid)
+    Pass your latest `watermark` as acked_ts - the kernel persists it so you (or
+    a revived you) can recover it via query_my_ACK_timestamp. Best-effort and
+    non-blocking: uploads your watermark, sends a '[CONNECTION CLOSED by <sid>]'
+    notice (which tells the peer to upload its own ts) and unregisters, then
+    returns `{closed: True}` immediately. Does NOT clean up the pipe (ts-based
+    ACK: un-acked messages stay; archived lazily via the watermark). Safe to
+    call even if the peer is unreachable. After this returns you may stop
+    listening and exit."""
+    return user_functions.close_connection(session_id, toid, acked_ts)
+
+
+@mcp.tool()
+def query_my_ACK_timestamp(session_id: str) -> int:
+    """Recover your latest ACK watermark from the kernel (the one you last passed
+    to listen or close_connection). Call this after a compact / long gap /
+    kernel restart if you've lost the watermark, then use the returned value as
+    `acked_ts` on your next listen. Returns 0 if none is recorded."""
+    return user_functions.query_my_ACK_timestamp(session_id)
 
 
 @mcp.tool()

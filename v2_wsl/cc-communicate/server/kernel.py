@@ -29,19 +29,23 @@ import machine_identity
 from paths import (
     CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
-    ALIVE_CONVS_FILE, ensure_runtime_dirs,
+    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
 _IDLE_TIMEOUT = float(os.environ.get("CC_MONITOR_IDLE_TIMEOUT", "600"))
 _BASE_SLEEP = 0.001
 _IDLE_CYCLES_BEFORE_BACKOFF = 10000
-_MAX_SLEEP = 1.0
+# T24/B5: cut from 1.0s to 0.2s so a polling `listen` (one listen_scan rpc per
+# cycle) wakes the kernel within ~0.2s instead of ~1s. Trades idle CPU for the
+# ~5x lower listen latency the watermark-ACK poll loop needs.
+_MAX_SLEEP = 0.2
 
 _seen_events: set[str] = set()
 sessions: dict = {}
 alive_sessions: dict = {}
 alive_conversations: dict = {}
+acked_timestamps: dict = {}  # T24: sid -> latest confirmed ACK watermark (persisted)
 _last_activity: float = 0.0
 
 _exit_requested = False
@@ -103,6 +107,24 @@ def _load_alive_convs():
 def _save_alive_convs():
     data = [[a, b, info] for (a, b), info in alive_conversations.items()]
     _atomic_write_json(ALIVE_CONVS_FILE, data)
+
+
+def _load_ack_timestamps():
+    """Reload per-sid ACK watermarks from disk (T24). acked_timestamps is
+    otherwise in-memory; listen_scan updates it in memory (frequent, no I/O) and
+    upload_ack_timestamp persists immediately (on close). This load catches the
+    case where the kernel restarts mid-conversation - the CC can recover its ts
+    via query_my_ACK_timestamp. Persisted as a flat {sid: ts} dict."""
+    data = _read_json(ACK_TIMESTAMPS_FILE)
+    if isinstance(data, dict):
+        for sid, ts in data.items():
+            if isinstance(ts, (int, float)):
+                acked_timestamps[sid] = int(ts)
+        log.info("loaded ack_timestamps.json: %d sids", len(acked_timestamps))
+
+
+def _save_ack_timestamps():
+    _atomic_write_json(ACK_TIMESTAMPS_FILE, acked_timestamps)
 
 
 def process_session_ctrl_event() -> bool:
@@ -219,6 +241,12 @@ def _dispatch(function: str, args: dict):
         return kernel_api.evoke(sessions, args["session_id"])
     if function == "collect_messages":
         return kernel_api.collect_messages(args["session_id"])
+    if function == "listen_scan":
+        return kernel_api.listen_scan(acked_timestamps, args["sid"], args.get("acked_ts", 0))
+    if function == "query_ack_timestamp":
+        return kernel_api.query_ack_timestamp(acked_timestamps, args["sid"])
+    if function == "upload_ack_timestamp":
+        return kernel_api.upload_ack_timestamp(acked_timestamps, args["sid"], args.get("ts", 0))
     if function == "session_by_pid":
         return kernel_api.session_by_pid(sessions, args["pid"])
     if function == "find_new_session":
@@ -288,6 +316,7 @@ def main():
 
     _load_sessions()
     _load_alive_convs()
+    _load_ack_timestamps()
     process_session_ctrl_event()
     _write_core_status(1)
     log.info("kernel READY - %d sessions known, %d alive", len(sessions), len(alive_sessions))
@@ -325,6 +354,7 @@ def main():
         _write_core_status(0)
         _save_sessions()
         _save_alive_convs()
+        _save_ack_timestamps()  # T24: persist in-memory listen_scan updates
         log.info("kernel exited")
 
 

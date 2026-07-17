@@ -25,7 +25,7 @@ import os
 import shutil
 import time
 
-from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT
+from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE
 from proc import proc_start_time
 import conversations
 import spawn
@@ -145,13 +145,18 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
         return "failed, session unknown"
     if prompt is None:
         prompt = ("You have been revived for p2p communication by cc-communicate. "
-                  "Call my_session_id to learn your id, then call listen (it blocks "
-                  "and returns messages addressed to you) and reply to any hello "
-                  "from peer sessions using send_message(your_id, peer_id, <message>). "
-                  "KEEP LISTENING: after each listen call returns, process any "
-                  "messages and call listen again, in a loop, until you call "
-                  "close_connection. Never invoke listen.py directly or write a "
-                  "shell listener - only use the listen tool.")
+                  "Call my_session_id to learn your id, then call listen "
+                  "(your_id, acked_ts, timeout) - it blocks and returns "
+                  "{messages, watermark}. Pass 0 as acked_ts the first time, and "
+                  "pass the returned watermark as acked_ts on every later listen "
+                  "(the kernel archives only what you've confirmed - never drop "
+                  "or duplicate it). Reply to any hello with send_message(your_id, "
+                  "peer_id, <message>). KEEP LISTENING: after each listen returns, "
+                  "process any messages and call listen again (with the latest "
+                  "watermark), in a loop, until you call close_connection(your_id, "
+                  "peer_id, your_latest_watermark). If you lose your watermark, "
+                  "call query_my_ACK_timestamp(your_id). Never invoke listen.py "
+                  "directly or write a shell listener - only use the listen tool.")
     spawn.spawn_cc_resume(session_id, prompt)
     return "evoke spawned (resumed)"
 
@@ -210,6 +215,92 @@ def collect_messages(session_id: str) -> list:
                 pass
     result.sort(key=lambda x: x["time"])
     return result
+
+
+# ---------- listening: watermark ACK (T24) ----------
+# collect_messages (above) is the OLD archive-on-read scan, kept for connect's
+# remote _archive_reply path. The CC-facing `listen` tool no longer uses it -
+# it uses listen_scan, which is cancel-safe: it only archives what the CC has
+# CONFIRMED (ts <= the watermark the CC passes back), never what it merely read.
+
+def listen_scan(acked_timestamps: dict, sid: str, acked_ts: int) -> dict:
+    """Atomic (kernel-thread) scan with timestamp ACK (T24). The CC passes its
+    last-confirmed watermark `acked_ts`; the kernel:
+      1. archives (pipe->log) every (to==sid, ts<=acked_ts) message [the CC
+         confirmed receipt of these], and
+      2. returns every (to==sid, ts>acked_ts) message [undelivered] WITHOUT
+         archiving them (peek), plus a new watermark = max returned ts (or
+         acked_ts if none).
+    Also updates acked_timestamps[sid] in memory (the CC confirmed acked_ts).
+    Cancel-safe: a cancelled listen archived only what the CC had already
+    confirmed in a PRIOR call; the just-returned messages stay in the pipe and
+    re-deliver next time. Atomicity comes from the kernel's single thread - no
+    send_message is processed during this scan, so the watermark is a consistent
+    snapshot (modulo the clock-backward risk logged as a potential bug)."""
+    if acked_ts and acked_ts > acked_timestamps.get(sid, 0):
+        acked_timestamps[sid] = acked_ts
+    messages = []
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        return {"messages": [], "watermark": acked_ts}
+    for name in entries:
+        parts = name.split(conversations.SEP)
+        if len(parts) != 2 or sid not in parts:
+            continue
+        pipe = os.path.join(CONVERSATIONS_DIR, name, "pipe")
+        log = os.path.join(CONVERSATIONS_DIR, name, "log")
+        if not os.path.isdir(pipe):
+            continue
+        for fname in os.listdir(pipe):
+            parsed = conversations.parse_pipe_filename(fname)
+            if not parsed:
+                continue
+            ts, _fr, to = parsed
+            if to != sid:
+                continue
+            src = os.path.join(pipe, fname)
+            if ts <= acked_ts:
+                # CC confirmed receipt -> archive (pipe->log)
+                os.makedirs(log, exist_ok=True)
+                try:
+                    os.replace(src, os.path.join(log, fname))
+                except OSError:
+                    pass
+                continue
+            # ts > acked_ts: undelivered -> read + return, do NOT archive
+            try:
+                with open(src, encoding="utf-8") as f:
+                    content = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue  # C5: skip malformed/undecodable files
+            messages.append({"time": ts, "from_id": _fr, "message": content})
+    messages.sort(key=lambda x: x["time"])
+    watermark = messages[-1]["time"] if messages else acked_ts
+    return {"messages": messages, "watermark": watermark}
+
+
+def query_ack_timestamp(acked_timestamps: dict, sid: str) -> int:
+    """Return the kernel's stored ACK watermark for sid (0 if unknown). Recovery
+    path (T24): a CC that lost its ts (compact / long gap / kernel restart) calls
+    query_my_ACK_timestamp to fetch this, then uses it as acked_ts on its next
+    listen."""
+    return acked_timestamps.get(sid, 0)
+
+
+def upload_ack_timestamp(acked_timestamps: dict, sid: str, ts: int) -> int:
+    """Persist the CC's latest ACK watermark (called by close_connection, T24).
+    Updates the in-memory dict AND writes ack_timestamps.json immediately (close
+    is infrequent, so the I/O is fine; this survives a later kernel crash). The
+    kernel also saves the dict on clean exit as a fallback for in-memory updates
+    from listen_scan. Returns the stored value."""
+    if ts and ts > acked_timestamps.get(sid, 0):
+        acked_timestamps[sid] = ts
+    try:
+        _atomic_write_json(ACK_TIMESTAMPS_FILE, acked_timestamps)
+    except OSError:
+        pass
+    return acked_timestamps.get(sid, 0)
 
 
 # ---------- conversation folder ----------

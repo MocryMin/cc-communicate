@@ -450,6 +450,74 @@ expected result). Also see `log/implementation-log.md` for raw output.
 - **Confidence**: high for C1/C2/C4/C5/R2 (live). C3 still unit-only. Remaining
   live gates: a real 2-CC multi-round conversation; cross-realm (WSL) re-run.
 
+### T24 - Timestamp-ACK `listen` + kernel-atomic scan (cancel-safe messaging)
+- **Bug (from the collab2 live test)**: a cancelled (ctrl+c'd) `listen` still
+  archived messages in the MCP-server worker thread - the CC discarded the
+  cancelled tool result, so the message was archived-and-lost (collab1's #7
+  answer). Root cause: `listen` archived-on-read, and the scan wasn't
+  synchronized to what the CC had confirmed. Diagnosed conclusively from both
+  CC logs + the archived filenames (collab1's #7 was in log/, both convs still
+  registered, step-22 listen returned only collab2's msg -> #7 was archived by
+  the cancelled step-19 listen).
+- **Fix (timestamp ACK + kernel-atomic scan)**:
+  - `listen(sid, acked_ts, timeout)` -> `{messages, watermark}`. The CC keeps
+    one watermark and passes it back on each call.
+  - New kernel handler `listen_scan(sid, acked_ts)`: runs in the kernel's
+    single thread (atomic w.r.t. send_message - no scan/write race). Archives
+    `(to==sid, ts<=acked_ts)` [what the CC confirmed], returns `(to==sid,
+    ts>acked_ts)` [peek, not archived] + `watermark = max returned ts`.
+  - Cancel-safe by construction: a cancelled listen only PEEKED (archived
+    nothing of the just-returned msgs); they re-deliver next call. Only what
+    the CC confirmed (via the watermark it passes back) gets archived.
+  - `close_connection(sid, toid, acked_ts)` uploads the watermark (persisted),
+    sends a close notice (with an instruction telling the peer to
+    `query_my_ACK_timestamp` + `close_connection` its side), unregisters. No
+    pipe cleanup (ts-based ACK: un-acked msgs archived lazily via the watermark).
+  - New `query_my_ACK_timestamp(sid)` recovers the stored watermark after
+    compact/long-gap/restart.
+  - Kernel persists `ack_timestamps.json` (in-memory update on every
+    `listen_scan`; immediate write on `upload_ack_timestamp`; fallback save on
+    exit).
+  - `_MAX_SLEEP` cut 1.0s -> 0.2s (B5: lower listen poll latency).
+  - Cross-realm: a WSL caller's `listen` also `call_remote("listen_scan")` to
+    the host (where cross-machine convs live). `connect`/`_poll_reply` left
+    as-is (B1: connect conveys no content; an interrupted connect = reconnect).
+- **Method**: functional test (fresh T24 kernel, synthetic peers) - peek (msg
+  stays in pipe after scan), ack (archived), partial-ack (msg2 archived, msg3
+  remains), upload+query (persisted), close (notice + upload instruction
+  delivered, pipe NOT cleaned, conv unregistered). All passed. py_compile +
+  parity (v2_win==v2_wsl except .mcp.json).
+- **Known residual risks (logged below as potential bugs, accepted)**: (A1)
+  same-ms same-(from,to) send overwrites (`open(path,"w")`); (A2) wall-clock
+  backward step can archive-without-return even with atomic scan. Both rare;
+  not fixed (user decision: keep `<ts>__<from>__<to>.md` format, no seq#).
+- **Confidence**: high for the mechanism (functional test covers cancel-safety,
+  partial-ack, persistence, close). Live gate: reproduce the collab2 scenario
+  (7 math rounds + mid-stream collab2 spawn, no loss) with real CCs.
+
+### Potential bugs (accepted risks, not fixed)
+
+- **PB-1 (A1) - same-ms message overwrite**: `send_message` writes
+  `<ts>__<from>__<to>.md` with `open(path, "w")`. Two sends in the same
+  millisecond with the same (from, to) collide on the filename -> the second
+  overwrites the first -> first message lost before any scan. Low probability
+  (the kernel processes sends sequentially; each takes ~1ms+; same-pair sends
+  are usually seconds apart). Fix when adopted: `O_EXCL` create + `__N` suffix
+  retry (no counter needed). Decision: not fixed (keep filename format).
+- **PB-2 (A2) - clock-backward archive-without-return**: the watermark is a
+  wall-clock ms (`time.time()*1000`). If the clock steps backward (NTP, manual),
+  a message written *later* can get an *earlier* ts; `archive(<=watermark)`
+  then eats it without it ever being returned. Atomic scan does NOT fix this
+  (it's a timestamp, not a monotonic seq). Windows NTP usually slews (no
+  backward step) - rare. Fix when adopted: a persisted monotonic counter
+  (seq#) as the watermark unit. Decision: not fixed (user chose timestamps).
+- **PB-3 - cross-realm clock skew**: a WSL caller's `listen` merges the local
+  (wsl clock) and host (host clock) watermarks. If the clocks differ, a later
+  wsl message can have a ts below the merged watermark and be archived-without-
+  return on the wsl side. Same-machine (host, the current test scenario) is
+  unaffected (one clock). Fix when adopted: per-machine watermarks or a global
+  seq#. Decision: not fixed (cross-realm is secondary).
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -570,12 +638,18 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | non-blocking terminate (C1) | high (LIVE) | T20/T23 - `close_connection` returns `{closed:true}` immediately, delivers close notice, unregisters; confirmed live |
 | conv registration persistence (R2) | high (LIVE) | T21/T23 - `alive_conversations.json` written + loaded across kernel restart; send succeeded post-restart w/o re-register; kernel.log `loaded 1 convs` |
 | handshake guide + tool (C4) | medium (LIVE tool) | T22/T23 - `help_connect_machines` returns guide (live); cross-realm exec proven by Amd8; full orchestration pending |
+| cancel-safe listen (T24) | high (func) | T24 - timestamp-ACK `listen` + kernel-atomic `listen_scan`: peek (no archive-on-read), archive only what CC confirmed; functional test covers cancel-safety + partial-ack + persistence + close. Live gate: reproduce collab2 scenario |
+| ACK watermark persistence (T24) | high (func) | T24 - `ack_timestamps.json` (in-mem on listen, persist on close/exit); `query_my_ACK_timestamp` recovers it. Functional test passed |
 
 > **Note (post-v0.2.0 robustness pass):** C1/C2/C4/C5/R2 are **implemented +
 > unit-tested + parity-verified + LIVE-verified** (T23, real MCP tools + fresh
 > kernel). C3 remains unit-only (live needs a real `connect` target). The two
 > earlier real-scene failures (background listen exit-1; collaborator stopped
-> listening + bash loop) are addressed by C2/C5 and confirmed live. Remaining
-> live gates: a real **2-CC multi-round conversation** (the synthetic-peer test
-> covered the mechanism end-to-end but with only one real CC), and a
-> **cross-realm (WSL) re-run** (WSL kernel also needs a restart to pick up R2).
+> listening + bash loop) are addressed by C2/C5 and confirmed live. **T24
+> (timestamp-ACK + kernel-atomic scan) fixes the collab2 cancel-loss bug**
+> (cancelled listen archiving-and-dropping messages): functional-tested, not yet
+> live-verified with real CCs. Remaining live gates: a real **2-CC multi-round
+> conversation** reproducing the collab2 scenario (no loss on interrupt), and a
+> **cross-realm (WSL) re-run** (WSL kernel needs a restart to pick up T24).
+> Accepted residual risks: PB-1 (same-ms overwrite), PB-2 (clock-backward),
+> PB-3 (cross-realm clock skew) - see "Potential bugs" above.
