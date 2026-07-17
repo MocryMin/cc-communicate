@@ -410,6 +410,46 @@ expected result). Also see `log/implementation-log.md` for raw output.
 - **Confidence**: medium (design sound; cross-realm exec feasibility already
   proven by Amd8 wake; the guide's steps + path-mangling caveat need a live run).
 
+### T23 - LIVE verification of C1/C2/C4/C5/R2 (real MCP tools, fresh kernel)
+- **Context**: after `/reload-plugins` (win+WSL) the MCP server restarted with new
+  code; the kernel was restarted via `terminate.flag` so R2 / C5-kernel_api /
+  C2-evoke-prompt were live. Drove the REAL MCP tools from a live CC session
+  (sid 81e4c033) with a synthetic peer (cctest-peer-0001) holding the conv.
+- **C2 blocking listen - CONFIRMED**: `listen(sid, timeout=8)` blocked ~8s then
+  returned `[]` (listen_blocking polls every 2s to deadline, then returns []);
+  a later call returned B's unicode reply within the timeout. Claude Code
+  tolerates the blocking MCP call - the gate PASSED (no kill, no crash, clean
+  return). The "wake" = the tool returning; re-arm = call again.
+- **C5 UTF-8 / no exit-1 - CONFIRMED**: `listen.py cctest-peer-0001 5` printed
+  `你好 from A ✓ ... こんにちは` as JSON, exit 0 (NO exit-1). A unicode reply was
+  also delivered through the real MCP `listen`. stdout.reconfigure(utf-8) holds on
+  Chinese Windows.
+- **R2 conv persists across kernel restart - CONFIRMED**: registered conv (A,B) ->
+  `alive_conversations.json` written; touched `terminate.flag` (kernel exited
+  cleanly: status=0, saved state); the next `send_message` restarted the kernel via
+  `ensure_core` and SUCCEEDED without re-registering. kernel.log shows
+  `loaded alive_conversations.json: 1 convs`. Before R2 this returned
+  `failed, connection not registered`.
+- **C1 non-blocking close - CONFIRMED**: `close_connection(A,B)` returned
+  `{closed:true, delivered_pending:[]}` immediately; B's next listen received the
+  `[CONNECTION CLOSED by A]` notice; `alive_conversations.json` became `[]`
+  (unregistered). Non-blocking, always succeeds.
+- **C4 help_connect_machines - CONFIRMED**: tool returns the full guide markdown.
+  (Full cross-realm orchestration still pending - needs 2 machines live.)
+- **C3 ts-filter - NOT live-tested**: exercised only inside `connect`'s
+  `_poll_reply`, which needs a real alive target (connect revives via evoke; a
+  synthetic peer fails evoke -> connect can't run). Remains unit-verified (T17).
+- **Side finding**: `/reload-plugins` restarted the MCP server (tools live) but
+  left a STALE core_status (pid 7112, status=1, process long dead); the first
+  kernel-bound MCP call's `ensure_core` detected the dead pid and started a fresh
+  kernel from the on-disk new code. So MCP-server fixes go live on `/reload-
+  plugins`; kernel fixes go live on the next `ensure_core` after the old kernel
+  dies (or after `terminate.flag`).
+- **Cleanup**: test conv dir removed; no stray python.exe (all calls foreground);
+  `alive_conversations.json` back to `[]`; git clean.
+- **Confidence**: high for C1/C2/C4/C5/R2 (live). C3 still unit-only. Remaining
+  live gates: a real 2-CC multi-round conversation; cross-realm (WSL) re-run.
+
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
@@ -524,15 +564,18 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | `--resume` SessionStart (#1) | high (Win + WSL) | T11 (Win) + WSL report: --resume fires SessionStart on both realms; B1 confirmed |
 | cross-session discovery + liveness | high | T11 - query_session + check_alive across two live CCs |
 | trust flag (#6) | high | T12 (Win) + WSL report: spawned CCs reach REPL with --dangerously-skip-permissions on both realms |
-| connect reply matching (C3) | high (unit) | T17 - ts-filter rejects stale close-notice + self-connect hello; unit-tested, pending live |
-| blocking listen + keep-listen law (C2) | high (unit) | T18 - listen is now a blocking tool (no bash/strays/exit-1); unit-tested, pending live (gate: 30s blocking MCP call) |
-| listen.py UTF-8 / decode hardening (C5) | high (unit) | T19 - stdout UTF-8 + UnicodeDecodeError skip; matches exit-1-bg/exit-2-fg pattern; pending live |
-| non-blocking terminate (C1) | high (logic) | T20 - close_connection fire-and-forget remote, always succeeds; pending live |
-| conv registration persistence (R2) | high (unit) | T21 - alive_conversations.json survives restart; unit-tested, pending live restart |
-| handshake guide + tool (C4) | medium | T22 - guide + help_connect_machines in both trees; cross-realm exec proven by Amd8; pending live orchestration |
+| connect reply matching (C3) | high (unit) | T17 - ts-filter rejects stale close-notice + self-connect hello; unit-tested. Live needs a real connect target (synthetic peer fails evoke) - T23 |
+| blocking listen + keep-listen law (C2) | high (LIVE) | T18/T23 - blocking MCP `listen` confirmed live: 8s block returned cleanly + delivered real messages; CC tolerates the blocking call (gate PASSED) |
+| listen.py UTF-8 / decode hardening (C5) | high (LIVE) | T19/T23 - unicode (`你好...こんにちは`) delivered via CLI + MCP listen, exit 0, NO exit-1; confirmed on Chinese Windows |
+| non-blocking terminate (C1) | high (LIVE) | T20/T23 - `close_connection` returns `{closed:true}` immediately, delivers close notice, unregisters; confirmed live |
+| conv registration persistence (R2) | high (LIVE) | T21/T23 - `alive_conversations.json` written + loaded across kernel restart; send succeeded post-restart w/o re-register; kernel.log `loaded 1 convs` |
+| handshake guide + tool (C4) | medium (LIVE tool) | T22/T23 - `help_connect_machines` returns guide (live); cross-realm exec proven by Amd8; full orchestration pending |
 
-> **Note (post-v0.2.0 robustness pass):** C1/C2/C3/C5/R2 are **implemented +
-> unit-tested + parity-verified**, but NOT yet live-verified with real CCs. The
-> two real-scene failures (background listen exit-1; collaborator stopped
-> listening + went off-script to a bash loop) drove C2/C5. Live re-runs of the
-> multi-round conversation + a kernel-restart-during-conv test are the next gate.
+> **Note (post-v0.2.0 robustness pass):** C1/C2/C4/C5/R2 are **implemented +
+> unit-tested + parity-verified + LIVE-verified** (T23, real MCP tools + fresh
+> kernel). C3 remains unit-only (live needs a real `connect` target). The two
+> earlier real-scene failures (background listen exit-1; collaborator stopped
+> listening + bash loop) are addressed by C2/C5 and confirmed live. Remaining
+> live gates: a real **2-CC multi-round conversation** (the synthetic-peer test
+> covered the mechanism end-to-end but with only one real CC), and a
+> **cross-realm (WSL) re-run** (WSL kernel also needs a restart to pick up R2).
