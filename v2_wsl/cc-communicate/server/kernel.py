@@ -254,7 +254,7 @@ def _dispatch(function: str, args: dict):
     if function == "spawn_cc_new":
         return kernel_api.spawn_cc_new(args["cwd"], args["prompt"])
     if function == "spawn_cc_resume":
-        return kernel_api.spawn_cc_resume(args["session_id"], args["prompt"])
+        return kernel_api.spawn_cc_resume(args["session_id"], args["prompt"], args.get("cwd"))
     if function == "create_conversation_folder":
         return kernel_api.create_conversation_folder(args["id1"], args["id2"])
     if function == "kernel_terminate":

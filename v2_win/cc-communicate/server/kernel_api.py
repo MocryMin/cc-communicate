@@ -157,7 +157,11 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
                   "peer_id, your_latest_watermark). If you lose your watermark, "
                   "call query_my_ACK_timestamp(your_id). Never invoke listen.py "
                   "directly or write a shell listener - only use the listen tool.")
-    spawn.spawn_cc_resume(session_id, prompt)
+    # T25: pass the session's original cwd. `claude --resume <sid>` is cwd-scoped
+    # (per-project .jsonl lookup); without the right cwd it runs in the kernel's
+    # cwd (data/server/) and fails "No conversation found with session ID: <sid>".
+    cwd = sessions.get(session_id, {}).get("cwd")
+    spawn.spawn_cc_resume(session_id, prompt, cwd)
     return "evoke spawned (resumed)"
 
 
@@ -169,8 +173,8 @@ def spawn_cc_new(cwd: str, prompt: str) -> str:
     return "spawned"
 
 
-def spawn_cc_resume(session_id: str, prompt: str) -> str:
-    spawn.spawn_cc_resume(session_id, prompt)
+def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None) -> str:
+    spawn.spawn_cc_resume(session_id, prompt, cwd)
     return "spawned"
 
 

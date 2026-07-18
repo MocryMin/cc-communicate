@@ -495,6 +495,53 @@ expected result). Also see `log/implementation-log.md` for raw output.
   partial-ack, persistence, close). Live gate: reproduce the collab2 scenario
   (7 math rounds + mid-stream collab2 spawn, no loss) with real CCs.
 
+### T25 - `evoke`/`spawn_cc_resume` cwd bug ("No conversation found" on reconnect)
+- **Bug (from the reconnect live test)**: after closing a collaborator CC and
+  asking the caller to reconnect, `connect`/`evoke` opened a cmd window showing
+  `No conversation found with session ID: <sid>` - an error from the `claude`
+  CLI, NOT from cc-communicate (that string is absent from the codebase). The
+  session .jsonl existed and was valid at
+  `~/.claude/projects/C--Users-Mocry/<sid>.jsonl` (177KB, 153 lines); the
+  caller's `query_session` had even returned the correct `cwd: C:\Users\Mocry`.
+  But `evoke` still failed both times (inside `connect`, and called directly).
+- **Root cause**: `spawn.spawn_cc_resume` did NOT pass the target session's cwd
+  - it ran `claude --resume <sid>` in the kernel's cwd (`data/server/`, set by
+  `check_core._spawn_kernel` `cwd=SERVER_DATA_DIR`). Claude Code stores sessions
+  per-project (`~/.claude/projects/<encoded-cwd>/<sid>.jsonl`) and `--resume
+  <sid>` looks the session up WITHIN the current project (cwd-scoped). From
+  `data/server/` it searched the wrong project dir, didn't find `<sid>` (which
+  lives under `C--Users-Mocry`), and printed "No conversation found". The known
+  cwd was thrown away: `user_functions.evoke` forwarded only `session_id`, and
+  `kernel_api.evoke` never read `sessions[sid]["cwd"]`. (The docstring's "cwd is
+  restored by --resume" assumption was wrong - `--resume` restores the
+  conversation, NOT the process cwd, and the lookup happens before any restore.)
+- **Evidence**: the error window's prompt was `…\data\server>` (the kernel cwd);
+  the .jsonl was valid at `C--Users-Mocry`; `Popen(cwd=X)` + `cmd /c start` was
+  verified to launch the child in cwd=X.
+- **Fix**: `kernel_api.evoke` reads `cwd = sessions[sid]["cwd"]` and passes it
+  to `spawn.spawn_cc_resume(sid, prompt, cwd)`. `spawn_cc_resume` accepts `cwd`
+  and sets it via `Popen(cwd=…)` (Windows) / `_tmux_spawn(cwd or "", …)` (WSL,
+  already wired with `-c cwd`). Same change applied to `spawn_cc_new` (latent:
+  its `start /D <path>` broke on space-containing cwds like
+  `C:\研究生\实习\learn AI\…` - switched to `Popen(cwd=…)`, robust to spaces).
+  The (currently dead - no RPC caller) `kernel_api.spawn_cc_resume` kernel
+  function + its dispatch also accept `cwd` for forward-compat. Both realms
+  (parity identical); 16 MCP tools unchanged.
+- **Method**: py_compile clean (6 files); parity diff identical (spawn.py /
+  kernel_api.py / kernel.py); unit test - `evoke` passes `sessions[sid]["cwd"]`
+  to `spawn_cc_resume` (cwd present -> passed; cwd missing -> None fallback;
+  unknown sid -> "failed, session unknown"). `Popen(cwd=…)` child-cwd
+  inheritance verified separately.
+- **Note on the eventual successful resume**: a `start` event with
+  `source:resume, cwd:C:\Users\Mocry` fired ~105s after the last end - but the
+  .jsonl has NO entries after the original run's close, so that resumed session
+  started idle (never processed the evoke prompt). It was not the evoke that
+  succeeded (evoke ran from `data/server/` and failed both times); almost
+  certainly a manual resume. The fix makes the automatic `evoke` path work.
+- **Confidence**: high for the mechanism (unit + cwd-inheritance verified). Live
+  gate: reconnect to a real closed CC via `evoke`/`connect` and confirm it
+  resumes from the correct cwd (no "No conversation found" window).
+
 ### Potential bugs (accepted risks, not fixed)
 
 - **PB-1 (A1) - same-ms message overwrite**: `send_message` writes
@@ -640,6 +687,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | handshake guide + tool (C4) | medium (LIVE tool) | T22/T23 - `help_connect_machines` returns guide (live); cross-realm exec proven by Amd8; full orchestration pending |
 | cancel-safe listen (T24) | high (func) | T24 - timestamp-ACK `listen` + kernel-atomic `listen_scan`: peek (no archive-on-read), archive only what CC confirmed; functional test covers cancel-safety + partial-ack + persistence + close. Live gate: reproduce collab2 scenario |
 | ACK watermark persistence (T24) | high (func) | T24 - `ack_timestamps.json` (in-mem on listen, persist on close/exit); `query_my_ACK_timestamp` recovers it. Functional test passed |
+| evoke cwd / `--resume` lookup (T25) | high (unit) | T25 - `evoke` passes `sessions[sid]["cwd"]` to `spawn_cc_resume` (Popen cwd, not `start /D`); `claude --resume` is cwd-scoped (per-project .jsonl). Unit-tested + cwd-inheritance verified. Live gate: reconnect a real closed CC |
 
 > **Note (post-v0.2.0 robustness pass):** C1/C2/C4/C5/R2 are **implemented +
 > unit-tested + parity-verified + LIVE-verified** (T23, real MCP tools + fresh
@@ -648,8 +696,12 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 > listening + bash loop) are addressed by C2/C5 and confirmed live. **T24
 > (timestamp-ACK + kernel-atomic scan) fixes the collab2 cancel-loss bug**
 > (cancelled listen archiving-and-dropping messages): functional-tested, not yet
-> live-verified with real CCs. Remaining live gates: a real **2-CC multi-round
-> conversation** reproducing the collab2 scenario (no loss on interrupt), and a
-> **cross-realm (WSL) re-run** (WSL kernel needs a restart to pick up T24).
+> live-verified with real CCs. **T25 fixes the reconnect "No conversation found"**
+> bug (`evoke`/`spawn_cc_resume` now pass the session's cwd so `claude --resume`
+> runs in the right project): unit-tested + cwd-inheritance verified, not yet
+> live-verified. Remaining live gates: a real **2-CC multi-round conversation**
+> reproducing the collab2 scenario (no loss on interrupt), a **cross-realm (WSL)
+> re-run** (WSL kernel needs a restart to pick up T24/T25), and a **reconnect of
+> a real closed CC** via `evoke`/`connect` (T25).
 > Accepted residual risks: PB-1 (same-ms overwrite), PB-2 (clock-backward),
 > PB-3 (cross-realm clock skew) - see "Potential bugs" above.

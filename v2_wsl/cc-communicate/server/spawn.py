@@ -23,12 +23,15 @@ _DETACHED_PROCESS = 0x00000008
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
-def _detached_popen(cmd_args):
+def _detached_popen(cmd_args, cwd=None):
     """Windows: detached process independent of parent, survives parent exit.
-    `start` opens a new window for the interactive CC (it needs a TTY)."""
+    `start` opens a new window for the interactive CC (it needs a TTY). cwd is
+    set via Popen (not `start /D <path>`) so paths with spaces work, and so the
+    spawned/resumed CC's per-project lookup keys on the right cwd (T25)."""
     subprocess.Popen(
         cmd_args,
         creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
+        cwd=cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -72,21 +75,28 @@ def _tmux_spawn(cwd: str, claude_argv: list):
 def spawn_cc_new(cwd: str, prompt: str):
     """Spawn a NEW interactive CC in cwd (for create_collaborator). `claude
     <prompt>` (no -p) processes the prompt then enters the REPL (stays alive).
-    `--dangerously-skip-permissions` skips the workspace-trust dialog (Amd9)."""
+    `--dangerously-skip-permissions` skips the workspace-trust dialog (Amd9).
+    cwd is set via Popen (T25) - robust to spaces; claude keys its project store
+    on cwd, so the new session lands in the right project dir."""
     if os.name == "nt":
-        _detached_popen(["cmd", "/c", "start", "/D", cwd, "claude",
-                         "--dangerously-skip-permissions", prompt])
+        _detached_popen(["cmd", "/c", "start", "claude",
+                         "--dangerously-skip-permissions", prompt], cwd=cwd)
     else:
         _tmux_spawn(cwd, [_claude_bin(), "--dangerously-skip-permissions", prompt])
 
 
-def spawn_cc_resume(session_id: str, prompt: str):
+def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None):
     """Resume an existing CC session by id (for evoke). Same session_id restored.
     `claude --resume <id> <prompt>` enters the REPL, processes the prompt, stays
-    alive. cwd is restored by --resume, so no -c on the tmux branch."""
+    alive. cwd MUST be the session's original cwd (T25): `claude --resume <sid>`
+    looks the session up WITHIN the current project (cwd-scoped, per-project
+    .jsonl under ~/.claude/projects/<encoded-cwd>/). Run from the kernel's cwd
+    (data/server/) it fails with "No conversation found with session ID: <sid>".
+    `--resume` restores the conversation, NOT the process cwd, so set cwd here
+    explicitly (Popen on Windows, -c on tmux)."""
     if os.name == "nt":
         _detached_popen(["cmd", "/c", "start", "claude", "--resume", session_id,
-                         "--dangerously-skip-permissions", prompt])
+                         "--dangerously-skip-permissions", prompt], cwd=cwd)
     else:
-        _tmux_spawn("", [_claude_bin(), "--resume", session_id,
-                         "--dangerously-skip-permissions", prompt])
+        _tmux_spawn(cwd or "", [_claude_bin(), "--resume", session_id,
+                                "--dangerously-skip-permissions", prompt])
