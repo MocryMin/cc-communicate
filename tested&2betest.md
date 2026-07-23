@@ -542,6 +542,20 @@ expected result). Also see `log/implementation-log.md` for raw output.
   gate: reconnect to a real closed CC via `evoke`/`connect` and confirm it
   resumes from the correct cwd (no "No conversation found" window).
 
+### T26 - LIVE: 1v4 multi-collaborator validation (T24 cancel-safe confirmed)
+- **Test (user-run, Windows host, T24+T25 kernel)**: 1 caller + 4 collaborators,
+  4 separate conversations, 10+ rounds each, all ended cleanly.
+- **Result**: SUCCESS - no message loss across 4 concurrent peer conversations
+  over many rounds; clean `close_connection` ends on all sides. This is the live
+  gate for T24's cancel-safe timestamp-ACK messaging in a real multi-peer
+  scenario - the original collab2 cancel-loss bug is gone.
+- **T25 (reconnect cwd fix)**: deployed in the same kernel; the 1v4 ran on T25
+  code with no regression. A dedicated close-then-`evoke` reconnect remains the
+  explicit T25 gate (the 1v4 did not necessarily exercise reconnect).
+- **Confidence**: T24 cancel-safe messaging now LIVE-confirmed (high). Remaining
+  live gates: a real reconnect of a closed CC (T25), and the cross-realm (WSL)
+  re-run (WSL kernel needs a restart to pick up T24/T25).
+
 ### Potential bugs (accepted risks, not fixed)
 
 - **PB-1 (A1) - same-ms message overwrite**: `send_message` writes
@@ -685,7 +699,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 | non-blocking terminate (C1) | high (LIVE) | T20/T23 - `close_connection` returns `{closed:true}` immediately, delivers close notice, unregisters; confirmed live |
 | conv registration persistence (R2) | high (LIVE) | T21/T23 - `alive_conversations.json` written + loaded across kernel restart; send succeeded post-restart w/o re-register; kernel.log `loaded 1 convs` |
 | handshake guide + tool (C4) | medium (LIVE tool) | T22/T23 - `help_connect_machines` returns guide (live); cross-realm exec proven by Amd8; full orchestration pending |
-| cancel-safe listen (T24) | high (func) | T24 - timestamp-ACK `listen` + kernel-atomic `listen_scan`: peek (no archive-on-read), archive only what CC confirmed; functional test covers cancel-safety + partial-ack + persistence + close. Live gate: reproduce collab2 scenario |
+| cancel-safe listen (T24) | high (LIVE) | T24/T26 - timestamp-ACK `listen` + kernel-atomic `listen_scan`: peek (no archive-on-read), archive only what CC confirmed. **LIVE-confirmed (T26): 1v4, 4 peers, 10+ rounds each, no loss, clean end** |
 | ACK watermark persistence (T24) | high (func) | T24 - `ack_timestamps.json` (in-mem on listen, persist on close/exit); `query_my_ACK_timestamp` recovers it. Functional test passed |
 | evoke cwd / `--resume` lookup (T25) | high (unit) | T25 - `evoke` passes `sessions[sid]["cwd"]` to `spawn_cc_resume` (Popen cwd, not `start /D`); `claude --resume` is cwd-scoped (per-project .jsonl). Unit-tested + cwd-inheritance verified. Live gate: reconnect a real closed CC |
 
@@ -695,13 +709,13 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 > earlier real-scene failures (background listen exit-1; collaborator stopped
 > listening + bash loop) are addressed by C2/C5 and confirmed live. **T24
 > (timestamp-ACK + kernel-atomic scan) fixes the collab2 cancel-loss bug**
-> (cancelled listen archiving-and-dropping messages): functional-tested, not yet
-> live-verified with real CCs. **T25 fixes the reconnect "No conversation found"**
-> bug (`evoke`/`spawn_cc_resume` now pass the session's cwd so `claude --resume`
-> runs in the right project): unit-tested + cwd-inheritance verified, not yet
-> live-verified. Remaining live gates: a real **2-CC multi-round conversation**
-> reproducing the collab2 scenario (no loss on interrupt), a **cross-realm (WSL)
-> re-run** (WSL kernel needs a restart to pick up T24/T25), and a **reconnect of
-> a real closed CC** via `evoke`/`connect` (T25).
+> (cancelled listen archiving-and-dropping messages): functional-tested AND
+> **LIVE-confirmed (T26: 1v4, 4 peers, 10+ rounds, no loss, clean end)**. **T25
+> fixes the reconnect "No conversation found" bug** (`evoke`/`spawn_cc_resume`
+> now pass the session's cwd so `claude --resume` runs in the right project):
+> unit-tested + cwd-inheritance verified, ran in the 1v4 kernel with no
+> regression; a dedicated reconnect test remains. Remaining live gates: a **real
+> reconnect of a closed CC** via `evoke`/`connect` (T25), and a **cross-realm
+> (WSL) re-run** (WSL kernel needs a restart to pick up T24/T25).
 > Accepted residual risks: PB-1 (same-ms overwrite), PB-2 (clock-backward),
 > PB-3 (cross-realm clock skew) - see "Potential bugs" above.
