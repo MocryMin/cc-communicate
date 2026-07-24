@@ -34,7 +34,15 @@ def _files(root: Path) -> dict:
 
 
 def main() -> int:
+    for name, tree in (("win", WIN), ("wsl", WSL)):
+        if not tree.is_dir():
+            print("PARITY FAIL: %s tree is not an existing directory: %s" % (name, tree))
+            return 1
     win, wsl = _files(WIN), _files(WSL)
+    if not win and not wsl:
+        print("PARITY FAIL: 0 files found in either tree - refusing to pass "
+              "having compared nothing (trees: %s, %s)" % (WIN, WSL))
+        return 1
     problems = []
     for rel in sorted(set(win) | set(wsl)):
         if rel in ALLOWLIST:
