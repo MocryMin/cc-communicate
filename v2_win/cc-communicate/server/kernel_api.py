@@ -25,18 +25,17 @@ import os
 import shutil
 import time
 
-from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE
+from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE
 from proc import proc_start_time
 import conversations
+import fileutil
+import message_record
 import spawn
 import validation
 
 
 def _atomic_write_json(path: str, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f)
-    os.replace(tmp, path)
+    fileutil.atomic_write_json(path, obj)
 
 
 def query_session(sessions: dict, session_id: str):
@@ -75,16 +74,48 @@ def unregister_conversation(alive_conversations: dict, sid_a: str, sid_b: str):
 
 # ---------- messaging ----------
 
-def send_message(alive_conversations: dict, fromid: str, toid: str, message: str) -> str:
+def send_message(alive_conversations: dict, message_sequence: dict, store_id: str,
+                 fromid: str, toid: str, message: str, message_id: str = None) -> str:
+    """HP-01: allocate a per-store sequence, wrap the text in a v1 record,
+    atomically publish. The sequence counter is persisted BEFORE the message
+    (a crash in between leaves a gap - allowed; a sequence is never reused).
+    HP-03 dedup: a retry carrying the same message_id returns the ORIGINAL
+    result without publishing a duplicate. Return string keeps the legacy
+    'message_sent at <created_at_ms>' shape (connect parses it)."""
     a, b = sorted([fromid, toid])
     if (a, b) not in alive_conversations:
         return "failed, connection not registered"
-    ts = int(time.time() * 1000)
     d = conversations.ensure_conv_dir(fromid, toid)
-    path = os.path.join(d, "pipe", conversations.pipe_filename(fromid, toid, ts))
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(message)
-    return f"message_sent at {ts}"
+    if message_id:
+        found = _find_message_file(d, message_id)
+        if found:
+            rec = message_record.read_record(found)
+            ts = rec.get("created_at_ms", 0) if rec else 0
+            return f"message_sent at {ts}"
+    seq = int(message_sequence.get("last_allocated", 0)) + 1
+    message_sequence["last_allocated"] = seq
+    message_sequence["store_id"] = store_id
+    fileutil.atomic_write_json(MESSAGE_SEQUENCE_FILE, message_sequence)
+    rec = message_record.new_record(store_id, seq, fromid, toid, message,
+                                    message_id=message_id)
+    message_record.publish(d, rec)
+    return f"message_sent at {rec['created_at_ms']}"
+
+
+def _find_message_file(conv_d: str, message_id: str):
+    """Locate a published message by message_id (filename suffix) in pipe/ or
+    log/. Returns the full path, or None. O(files) - fine at this scale."""
+    suffix = "__" + message_id + ".json"
+    for sub in ("pipe", "log"):
+        d = os.path.join(conv_d, sub)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith(suffix):
+                return os.path.join(d, name)
+    return None
 
 
 def query_conversations(querier_sid: str) -> dict:
@@ -125,12 +156,13 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
         return "no messages"
     candidates = []
     for f in files:
-        parsed = conversations.parse_pipe_filename(f)
-        if not parsed:
+        info = conversations.parse_any_pipe_filename(f)
+        if not info or info["from_id"] != fromid:
             continue
-        ts, f_from, _f_to = parsed
-        if f_from == fromid:
-            candidates.append((ts, f))
+        # "latest": records order by sequence, legacy by ts; records always
+        # postdate legacy, so rank records above any legacy.
+        key = (1, info["sequence"]) if info["format"] == "record" else (0, info["ts"])
+        candidates.append((key, f))
     if not candidates:
         return f"no messages from {fromid}"
     candidates.sort(key=lambda x: x[0])
@@ -185,11 +217,49 @@ def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None) -> str:
 
 # ---------- listening (collect only; arm removed in Amd3) ----------
 
+def _read_pipe_message(src: str, info: dict):
+    """Build the normalized message dict for one pipe file (dual reader,
+    HP-01), or None to skip (malformed/partial/undecodable - C5). Shared by
+    listen_scan and collect_messages. The '_sort' key orders legacy .md first
+    (they predate the upgrade), then records by SEQUENCE - never by
+    created_at_ms (clock backward must not reorder, PB-2)."""
+    if info["format"] == "record":
+        rec = message_record.read_record(src)
+        if not rec:
+            return None
+        return {"time": rec.get("created_at_ms", 0),
+                "from_id": rec.get("from_session"),
+                "message": (rec.get("payload") or {}).get("text"),
+                "message_id": rec.get("message_id"),
+                "sequence": rec.get("sequence"),
+                "store_id": rec.get("store_id"),
+                "_sort": (1, 0, rec.get("sequence") or 0)}
+    try:
+        with open(src, encoding="utf-8") as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return {"time": info["ts"], "from_id": info["from_id"],
+            "message": content, "message_id": None,
+            "sequence": None, "store_id": None,
+            "_sort": (0, info["ts"], 0)}
+
+
+def _archive(src: str, log_dir: str, fname: str):
+    """pipe -> log, best-effort (shared by the scans)."""
+    os.makedirs(log_dir, exist_ok=True)
+    try:
+        os.replace(src, os.path.join(log_dir, fname))
+    except OSError:
+        pass
+
+
 def collect_messages(session_id: str) -> list:
     """Read all undelivered pipe messages addressed to session_id, move them to
-    log/, return sorted by time. Used by close_connection (drain) and by a peer's
-    listen.py to archive cross-machine messages (#W7). Direction-specific: only
-    messages where toid == session_id."""
+    log/, return sorted (legacy .md first, then records by sequence - see
+    _read_pipe_message). Used by close_connection (drain) and the remote
+    _archive_reply path. Direction-specific: only messages where
+    toid == session_id."""
     result = []
     try:
         entries = os.listdir(CONVERSATIONS_DIR)
@@ -205,24 +275,18 @@ def collect_messages(session_id: str) -> list:
         if not os.path.isdir(pipe):
             continue
         for fname in os.listdir(pipe):
-            parsed = conversations.parse_pipe_filename(fname)
-            if not parsed:
+            info = conversations.parse_any_pipe_filename(fname)
+            if not info or info["to_id"] != session_id:
                 continue
-            ts, fr, to = parsed
-            if to != session_id:
+            src = os.path.join(pipe, fname)
+            msg = _read_pipe_message(src, info)
+            if msg is None:
                 continue
-            try:
-                with open(os.path.join(pipe, fname), encoding="utf-8") as f:
-                    content = f.read()
-            except (OSError, UnicodeDecodeError):
-                continue  # C5: skip malformed/undecodable files instead of crashing
-            result.append({"time": ts, "from_id": fr, "message": content})
-            os.makedirs(log, exist_ok=True)
-            try:
-                os.replace(os.path.join(pipe, fname), os.path.join(log, fname))
-            except OSError:
-                pass
-    result.sort(key=lambda x: x["time"])
+            result.append(msg)
+            _archive(src, log, fname)
+    result.sort(key=lambda m: m["_sort"])
+    for m in result:
+        del m["_sort"]
     return result
 
 
@@ -233,19 +297,13 @@ def collect_messages(session_id: str) -> list:
 # CONFIRMED (ts <= the watermark the CC passes back), never what it merely read.
 
 def listen_scan(acked_timestamps: dict, sid: str, acked_ts: int) -> dict:
-    """Atomic (kernel-thread) scan with timestamp ACK (T24). The CC passes its
-    last-confirmed watermark `acked_ts`; the kernel:
-      1. archives (pipe->log) every (to==sid, ts<=acked_ts) message [the CC
-         confirmed receipt of these], and
-      2. returns every (to==sid, ts>acked_ts) message [undelivered] WITHOUT
-         archiving them (peek), plus a new watermark = max returned ts (or
-         acked_ts if none).
-    Also updates acked_timestamps[sid] in memory (the CC confirmed acked_ts).
-    Cancel-safe: a cancelled listen archived only what the CC had already
-    confirmed in a PRIOR call; the just-returned messages stay in the pipe and
-    re-deliver next time. Atomicity comes from the kernel's single thread - no
-    send_message is processed during this scan, so the watermark is a consistent
-    snapshot (modulo the clock-backward risk logged as a potential bug)."""
+    """LEGACY timestamp-ACK scan (kept for the deprecation window, HP-01 dual
+    reader via _read_pipe_message). Archive rule is unchanged:
+    (to==sid, time<=acked_ts) moves pipe->log; for records the record's
+    created_at_ms stands in for the timestamp until HP-02 cursors take over.
+    Record message dicts carry message_id/sequence/store_id; legacy entries
+    carry them as None. Cancel-safe: only what a PRIOR call confirmed is
+    archived; the just-returned messages stay in the pipe and re-deliver."""
     if acked_ts and acked_ts > acked_timestamps.get(sid, 0):
         acked_timestamps[sid] = acked_ts
     messages = []
@@ -262,30 +320,23 @@ def listen_scan(acked_timestamps: dict, sid: str, acked_ts: int) -> dict:
         if not os.path.isdir(pipe):
             continue
         for fname in os.listdir(pipe):
-            parsed = conversations.parse_pipe_filename(fname)
-            if not parsed:
-                continue
-            ts, _fr, to = parsed
-            if to != sid:
+            info = conversations.parse_any_pipe_filename(fname)
+            if not info or info["to_id"] != sid:
                 continue
             src = os.path.join(pipe, fname)
-            if ts <= acked_ts:
-                # CC confirmed receipt -> archive (pipe->log)
-                os.makedirs(log, exist_ok=True)
-                try:
-                    os.replace(src, os.path.join(log, fname))
-                except OSError:
-                    pass
+            msg = _read_pipe_message(src, info)
+            if msg is None:
                 continue
-            # ts > acked_ts: undelivered -> read + return, do NOT archive
-            try:
-                with open(src, encoding="utf-8") as f:
-                    content = f.read()
-            except (OSError, UnicodeDecodeError):
-                continue  # C5: skip malformed/undecodable files
-            messages.append({"time": ts, "from_id": _fr, "message": content})
-    messages.sort(key=lambda x: x["time"])
-    watermark = messages[-1]["time"] if messages else acked_ts
+            if msg["time"] <= acked_ts:
+                # CC confirmed receipt -> archive (pipe->log)
+                _archive(src, log, fname)
+                continue
+            # time > acked_ts: undelivered -> return WITHOUT archiving
+            messages.append(msg)
+    messages.sort(key=lambda m: m["_sort"])
+    for m in messages:
+        del m["_sort"]
+    watermark = max([m["time"] for m in messages], default=acked_ts)
     return {"messages": messages, "watermark": watermark}
 
 

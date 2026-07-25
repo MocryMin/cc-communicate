@@ -1,8 +1,12 @@
+def _seq_state():
+    return {"schema_version": 1, "store_id": "store-test", "last_allocated": 0}
+
+
 def test_cancel_listen_redelivers(server):
     ka = server.kernel_api
     convs, acked = {}, {}
     ka.register_conversation(convs, "alice", "bob")
-    ka.send_message(convs, "alice", "bob", "m1")
+    ka.send_message(convs, _seq_state(), "store-test", "alice", "bob", "m1")
 
     # 第一次 listen：CC peek 到消息（但在确认前被 cancel）
     res1 = ka.listen_scan(acked, "bob", 0)

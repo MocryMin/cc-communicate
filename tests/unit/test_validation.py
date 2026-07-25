@@ -99,7 +99,8 @@ def test_fuzz_no_escape(server):
         if not isinstance(bad, str) or not bad:
             continue
         try:
-            ka.send_message(convs, bad, "bob", "x")
+            # HP-01 signature: convs, seq, store_id, fromid, toid, text
+            ka.send_message(convs, {"schema_version":1,"store_id":"t","last_allocated":0}, "t", bad, "bob", "x")
         except server.validation.InvalidArgumentError:
             pass
         try:

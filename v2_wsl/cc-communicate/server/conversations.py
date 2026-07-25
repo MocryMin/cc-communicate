@@ -24,6 +24,7 @@ import os
 
 from paths import CONVERSATIONS_DIR
 from validation import validate_session_id
+import message_record
 
 SEP = "__"
 
@@ -100,3 +101,29 @@ def count_undelivered(session_id: str) -> int:
             if parsed and parsed[2] == session_id:  # toid == session_id
                 total += 1
     return total
+
+
+def parse_any_pipe_filename(name: str):
+    """Normalize BOTH pipe filename formats (reader-side dispatcher, HP-01).
+
+    Legacy v0.3: <ts:013d>__<from>__<to>.md
+        -> {"format": "legacy", "ts": int, "from_id", "to_id",
+            "sequence": None, "message_id": None}
+    Record v1:   <seq:020d>__<from>__<to>__<message_id>.json
+        -> {"format": "record", "ts": None, "from_id", "to_id",
+            "sequence": int, "message_id": str}
+    Malformed -> None. Tolerant by design: this is a reader, not a boundary.
+    """
+    if name.endswith(".md"):
+        parsed = parse_pipe_filename(name)
+        if not parsed:
+            return None
+        ts, fromid, toid = parsed
+        return {"format": "legacy", "ts": ts, "from_id": fromid,
+                "to_id": toid, "sequence": None, "message_id": None}
+    parsed = message_record.parse_record_filename(name)
+    if not parsed:
+        return None
+    seq, fromid, toid, mid = parsed
+    return {"format": "record", "ts": None, "from_id": fromid,
+            "to_id": toid, "sequence": seq, "message_id": mid}

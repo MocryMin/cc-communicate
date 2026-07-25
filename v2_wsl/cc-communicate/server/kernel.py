@@ -25,12 +25,13 @@ import signal
 import time
 
 import kernel_api
+import fileutil
 import machine_identity
 import validation
 from paths import (
-    CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
+    CONVERSATIONS_DIR, CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
-    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, ensure_runtime_dirs,
+    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
@@ -47,6 +48,8 @@ sessions: dict = {}
 alive_sessions: dict = {}
 alive_conversations: dict = {}
 acked_timestamps: dict = {}  # T24: sid -> latest confirmed ACK watermark (persisted)
+message_sequence: dict = {}  # HP-01: {"schema_version","store_id","last_allocated"}
+_local_store_id: str = "unknown"
 _last_activity: float = 0.0
 
 _exit_requested = False
@@ -55,10 +58,7 @@ _local_machine_type: str = "unknown"
 
 
 def _atomic_write_json(path: str, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+    fileutil.atomic_write_json(path, obj, indent=2)
 
 
 def _read_json(path: str):
@@ -126,6 +126,42 @@ def _load_ack_timestamps():
 
 def _save_ack_timestamps():
     _atomic_write_json(ACK_TIMESTAMPS_FILE, acked_timestamps)
+
+
+def _load_message_sequence():
+    """Load the persistent per-store sequence counter (HP-01), self-healing to
+    max(persisted, max sequence found in any pipe/log file) so a lost/corrupt
+    counter NEVER causes sequence reuse."""
+    import conversations as _conv
+    data = _read_json(MESSAGE_SEQUENCE_FILE)
+    state = {"schema_version": 1, "store_id": _local_store_id, "last_allocated": 0}
+    if isinstance(data, dict) and isinstance(data.get("last_allocated"), (int, float)):
+        state["last_allocated"] = max(0, int(data["last_allocated"]))
+        if data.get("store_id"):
+            state["store_id"] = data["store_id"]
+    found = 0
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        entries = []
+    for name in entries:
+        for sub in ("pipe", "log"):
+            d = os.path.join(CONVERSATIONS_DIR, name, sub)
+            if not os.path.isdir(d):
+                continue
+            for fname in os.listdir(d):
+                info = _conv.parse_any_pipe_filename(fname)
+                if info and info["sequence"] is not None:
+                    found = max(found, info["sequence"])
+    state["last_allocated"] = max(state["last_allocated"], found)
+    message_sequence.clear()
+    message_sequence.update(state)
+    log.info("loaded message_sequence: last_allocated=%d (healed from files=%d)",
+             state["last_allocated"], found)
+
+
+def _save_message_sequence():
+    _atomic_write_json(MESSAGE_SEQUENCE_FILE, message_sequence)
 
 
 def process_session_ctrl_event() -> bool:
@@ -231,7 +267,8 @@ _ARG_VALIDATORS = {
     "query_conversations": {"session_id": validation.validate_session_id},
     "send_message": {"fromid": validation.validate_session_id,
                      "toid": validation.validate_session_id,
-                     "message": validation.validate_message_size},
+                     "message": validation.validate_message_size,
+                     "message_id": validation.validate_message_id},
     "register_conversation": {"sid_a": validation.validate_session_id,
                               "sid_b": validation.validate_session_id},
     "unregister_conversation": {"sid_a": validation.validate_session_id,
@@ -266,7 +303,9 @@ def _dispatch(function: str, args: dict):
     if function == "query_conversations":
         return kernel_api.query_conversations(args["session_id"])
     if function == "send_message":
-        return kernel_api.send_message(alive_conversations, args["fromid"], args["toid"], args["message"])
+        return kernel_api.send_message(
+            alive_conversations, message_sequence, _local_store_id,
+            args["fromid"], args["toid"], args["message"], args.get("message_id"))
     if function == "register_conversation":
         kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
         return "ok"
@@ -342,19 +381,22 @@ def _install_signal_handlers():
 
 
 def main():
-    global _last_activity, _local_machine_type
+    global _last_activity, _local_machine_type, _local_store_id
     _setup_logging()
     _install_signal_handlers()
     ensure_runtime_dirs()
     # v2: establish machine identity (creates machine_identity.json on first
     # run, detects type + claude_bin). Stamps local sessions with `machine`.
-    _local_machine_type = machine_identity.load_or_create().get("type", "unknown")
+    ident = machine_identity.load_or_create()
+    _local_machine_type = ident.get("type", "unknown")
+    _local_store_id = ident.get("id", "unknown")
     log.info("kernel starting (pid=%d, machine=%s, idle_timeout=%ss)",
              os.getpid(), _local_machine_type, _IDLE_TIMEOUT)
 
     _load_sessions()
     _load_alive_convs()
     _load_ack_timestamps()
+    _load_message_sequence()
     process_session_ctrl_event()
     _write_core_status(1)
     log.info("kernel READY - %d sessions known, %d alive", len(sessions), len(alive_sessions))
@@ -393,6 +435,7 @@ def main():
         _save_sessions()
         _save_alive_convs()
         _save_ack_timestamps()  # T24: persist in-memory listen_scan updates
+        _save_message_sequence()
         log.info("kernel exited")
 
 

@@ -1,11 +1,15 @@
 import os
 
 
+def _seq_state():
+    return {"schema_version": 1, "store_id": "store-test", "last_allocated": 0}
+
+
 def test_register_send_listen_ack_roundtrip(server):
     ka = server.kernel_api
     convs, acked = {}, {}
     ka.register_conversation(convs, "alice", "bob")
-    r = ka.send_message(convs, "alice", "bob", "hello")
+    r = ka.send_message(convs, _seq_state(), "store-test", "alice", "bob", "hello")
     assert r.startswith("message_sent at ")
 
     # bob 以 acked_ts=0 listen -> peek 到消息但不归档
@@ -27,5 +31,5 @@ def test_register_send_listen_ack_roundtrip(server):
 def test_send_requires_registration(server):
     ka = server.kernel_api
     convs = {}
-    r = ka.send_message(convs, "alice", "bob", "hi")
+    r = ka.send_message(convs, _seq_state(), "store-test", "alice", "bob", "hi")
     assert r == "failed, connection not registered"

@@ -27,6 +27,7 @@ import time
 
 import rpc_client
 import conversations
+import message_record
 import spawn
 import machine_identity
 from paths import CONVERSATIONS_DIR, PLUGIN_ROOT, MACHINE_INFO_LOG_DIR
@@ -150,9 +151,9 @@ def _scan_pipe(pipe_dir, want_toid):
     except (FileNotFoundError, PermissionError, OSError):
         return out
     for fname in files:
-        parsed = conversations.parse_pipe_filename(fname)
-        if parsed and parsed[2] == want_toid:
-            out.append((fname, os.path.join(pipe_dir, fname)))
+        info = conversations.parse_any_pipe_filename(fname)
+        if info and info["to_id"] == want_toid:
+            out.append((fname, os.path.join(pipe_dir, fname), info))
     return out
 
 
@@ -184,22 +185,30 @@ def _archive_reply(conv_remote, caller, fname, path):
 
 
 def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
-    """Scan pipe_dir once for target's reply (a pipe file with toid==caller,
-    fromid==target). Returns the reply content (archiving the file), or None.
-    Stale messages (ts <= hello_ts) are skipped (C3): a prior [CONNECTION CLOSED]
-    notice left in the pipe, or the hello itself, must not be mistaken for the
-    reply (the hello and any close notice predate the hello we just sent)."""
-    for fname, path in _scan_pipe(pipe_dir, caller):
-        parsed = conversations.parse_pipe_filename(fname)
-        if not parsed or parsed[1] != target:
-            continue  # not from target
-        if parsed[0] <= hello_ts:
+    """Scan pipe_dir once for target's reply (toid==caller, fromid==target).
+    Returns the reply content (archiving the file), or None. Stale messages
+    (ts <= hello_ts) are skipped (C3). Dual reader (HP-01): for records the
+    envelope supplies ts/content."""
+    for fname, path, info in _scan_pipe(pipe_dir, caller):
+        if info["from_id"] != target:
+            continue
+        if info["format"] == "record":
+            rec = message_record.read_record(path)
+            if not rec:
+                continue
+            ts = rec.get("created_at_ms", 0)
+            content = (rec.get("payload") or {}).get("text")
+            if content is None:
+                continue
+        else:
+            ts = info["ts"]
+            try:
+                with open(path, encoding="utf-8") as f:
+                    content = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue  # C5: skip malformed/undecodable files
+        if ts <= hello_ts:
             continue  # C3: stale (not newer than the hello) - skip
-        try:
-            with open(path, encoding="utf-8") as f:
-                content = f.read()
-        except (OSError, UnicodeDecodeError):
-            continue  # C5: skip malformed/undecodable files
         _archive_reply(conv_remote, caller, fname, path)
         return content
     return None
