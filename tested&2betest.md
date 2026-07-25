@@ -719,3 +719,34 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 > (WSL) re-run** (WSL kernel needs a restart to pick up T24/T25).
 > Accepted residual risks: PB-1 (same-ms overwrite), PB-2 (clock-backward),
 > PB-3 (cross-realm clock skew) - see "Potential bugs" above.
+
+### T27 — HP-03 journal per-mutation fsync blocks event loop → spawn race (LIVE)
+
+- **Bug (from Wave 1 live testing)**: `create_collaborator` spawned TWO CCs
+  (one connected, one couldn't get session_id) or spawned one + an error window
+  with a `data/` path. The second process was `claude --resume <sid>` launched
+  by `connect → evoke` — a pre-existing race (new CC's SessionStart not yet
+  processed → `check_alive` fails → `evoke` triggers a second `spawn_cc_resume`).
+- **Why Wave 1 made it worse**: HP-03's `operation_journal.save()` (with fsync)
+  was called on EVERY mutation inside `drain_queue` — `register_conversation`,
+  `send_message`, etc. each triggered a synchronous disk sync. These competed
+  with `process_session_ctrl_event` in the kernel's singleton event loop,
+  delaying SessionStart processing and widening the race window.
+- **Diagnosis**: traced the full `create_collaborator → connect → check_alive →
+  evoke → spawn_cc_resume(cwd=None) → kernel cwd (data/server/)` chain. The
+  error window's "data path" confirmed `spawn_cc_resume` ran from the kernel's
+  cwd because the SessionStart event hadn't been processed → session had no
+  `cwd` record → `evoke` passed `cwd=None` → child inherited kernel's
+  `SERVER_DATA_DIR`.
+- **Fix**: journal save is now batched — once per `drain_queue` cycle, not per
+  mutation (`journal_dirty` flag). The journal is the "fast dedup path"; domain
+  keys (message_id) are the crash-surviving truth per the HP-03 design spec.
+  Losing unflushed journal entries on crash is documented-safe: retry is caught
+  by domain dedup (send via message_id, register/unregister naturally idempotent).
+- **Files**: `kernel.py::drain_queue` (v2_win + v2_wsl, parity verified).
+- **Method**: analyzed the double-spawn + error-window symptoms; identified
+  per-mutation fsync as the event-loop blocker; implemented batch save; 50/50
+  tests green + parity OK. Pending live re-test with real `create_collaborator`.
+- **Confidence**: high for the mechanism (the fsync bottleneck is eliminated;
+  domain dedup covers the relaxed durability). Live gate: clean
+  `create_collaborator` with exactly one spawned window, no error window.
