@@ -276,6 +276,7 @@ def drain_queue() -> bool:
     except FileNotFoundError:
         return False
     reqs = [f for f in files if f.endswith(".json")]
+    journal_dirty = False
     for fname in reqs:
         path = os.path.join(QUEUE_DIR, fname)
         try:
@@ -303,12 +304,18 @@ def drain_queue() -> bool:
             if journaled:
                 operation_journal_mod.record_completed(
                     operation_journal, op_id, function, result)
-                operation_journal_mod.save(OPERATION_JOURNAL_FILE, operation_journal)
+                journal_dirty = True
+                # Deferred save: the journal is the fast dedup path at retry
+                # time; domain keys (message_id) are the crash-surviving truth.
+                # Saving once per drain cycle, not per mutation, keeps the
+                # kernel's event loop fast and avoids spawn-race regressions.
         except Exception as e:
             log.exception("error handling request %s", fname)
             resp = {"request_id": req.get("request_id") if req else None,
                     "result": None, "error": f"{type(e).__name__}: {e}"}
         _write_response_and_consume(resp, path)
+    if journal_dirty:
+        operation_journal_mod.save(OPERATION_JOURNAL_FILE, operation_journal)
     return bool(reqs)
 
 
