@@ -27,11 +27,13 @@ import time
 import kernel_api
 import fileutil
 import machine_identity
+import operation_journal as operation_journal_mod
 import validation
 from paths import (
     CONVERSATIONS_DIR, CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
-    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE, ensure_runtime_dirs,
+    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE,
+    OPERATION_JOURNAL_FILE, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
@@ -50,6 +52,7 @@ alive_conversations: dict = {}
 acked_timestamps: dict = {}  # T24: sid -> latest confirmed ACK watermark (persisted)
 message_sequence: dict = {}  # HP-01: {"schema_version","store_id","last_allocated"}
 cursors: dict = {}  # HP-02: sid -> {store_id: confirmed sequence} (persisted)
+operation_journal: dict = {}  # HP-03: operation_id -> completed mutation record
 _local_store_id: str = "unknown"
 _last_activity: float = 0.0
 
@@ -189,6 +192,12 @@ def _save_cursors():
     _atomic_write_json(CURSORS_FILE, {"schema_version": 1, "sessions": cursors})
 
 
+def _load_operation_journal():
+    operation_journal.clear()
+    operation_journal.update(operation_journal_mod.load(OPERATION_JOURNAL_FILE))
+    log.info("loaded operation journal: %d entries", len(operation_journal))
+
+
 def process_session_ctrl_event() -> bool:
     try:
         files = os.listdir(SESSION_CTRL_DIR)
@@ -248,6 +257,19 @@ def _handle_end(ev: dict, sid: str):
         sessions[sid]["ended_at"] = ev.get("event_ts")
 
 
+# HP-03: mutations whose retry must not re-execute side effects. High-frequency
+# scans (listen_scan/_v2) are naturally idempotent (same cursor rescan is
+# harmless) and are excluded to keep journal churn low. spawn/evoke are
+# journaled for the rpc-retry window; their cross-crash-window dedup lands with
+# HP-04 spawn_token (Wave 2).
+_JOURNALED_FUNCTIONS = frozenset({
+    "send_message", "register_conversation", "unregister_conversation",
+    "withdraw", "create_conversation_folder", "upload_ack_timestamp",
+    "upload_cursor", "collect_messages", "spawn_cc_new", "spawn_cc_resume",
+    "evoke", "kernel_terminate",
+})
+
+
 def drain_queue() -> bool:
     try:
         files = sorted(os.listdir(QUEUE_DIR))
@@ -259,27 +281,46 @@ def drain_queue() -> bool:
         try:
             req = _read_json(path)
         except OSError:
-            # Transient read error (e.g. AV scan / write race on Windows) - leave
-            # the file for the next cycle instead of crashing the kernel. (T12)
-            continue
+            continue  # T12: transient read error -> retry next cycle
         try:
             if not req or "function" not in req or "request_id" not in req:
                 raise ValueError("malformed request")
-            result = _dispatch(req["function"], req.get("args") or {})
+            function = req["function"]
+            op_id = req.get("operation_id")
+            journaled = op_id and function in _JOURNALED_FUNCTIONS
+            if journaled:
+                hit, replay = operation_journal_mod.completed_result(
+                    operation_journal, op_id)
+                if hit:
+                    # HP-03: retry of a completed operation - replay the
+                    # recorded result WITHOUT re-executing the side effect.
+                    resp = {"request_id": req["request_id"], "result": replay,
+                            "error": None}
+                    _write_response_and_consume(resp, path)
+                    continue
+            result = _dispatch(function, req.get("args") or {})
             resp = {"request_id": req["request_id"], "result": result, "error": None}
+            if journaled:
+                operation_journal_mod.record_completed(
+                    operation_journal, op_id, function, result)
+                operation_journal_mod.save(OPERATION_JOURNAL_FILE, operation_journal)
         except Exception as e:
             log.exception("error handling request %s", fname)
             resp = {"request_id": req.get("request_id") if req else None,
                     "result": None, "error": f"{type(e).__name__}: {e}"}
-        rid = resp["request_id"]
-        if rid is not None:
-            os.makedirs(QUEUE_RESPONSES_DIR, exist_ok=True)
-            _atomic_write_json(os.path.join(QUEUE_RESPONSES_DIR, rid + ".json"), resp)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        _write_response_and_consume(resp, path)
     return bool(reqs)
+
+
+def _write_response_and_consume(resp: dict, req_path: str):
+    rid = resp["request_id"]
+    if rid is not None:
+        os.makedirs(QUEUE_RESPONSES_DIR, exist_ok=True)
+        _atomic_write_json(os.path.join(QUEUE_RESPONSES_DIR, rid + ".json"), resp)
+    try:
+        os.remove(req_path)
+    except OSError:
+        pass
 
 
 # HP-06: per-function arg validators applied at the dispatch trust boundary.
@@ -299,7 +340,8 @@ _ARG_VALIDATORS = {
     "unregister_conversation": {"sid_a": validation.validate_session_id,
                                 "sid_b": validation.validate_session_id},
     "withdraw": {"fromid": validation.validate_session_id,
-                 "toid": validation.validate_session_id},
+                 "toid": validation.validate_session_id,
+                 "message_id": validation.validate_message_id},
     "evoke": {"session_id": validation.validate_session_id},
     "collect_messages": {"session_id": validation.validate_session_id},
     "listen_scan": {"sid": validation.validate_session_id},
@@ -341,7 +383,7 @@ def _dispatch(function: str, args: dict):
         kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
         return "ok"
     if function == "withdraw":
-        return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0))
+        return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0), args.get("message_id"))
     if function == "evoke":
         return kernel_api.evoke(sessions, args["session_id"])
     if function == "collect_messages":
@@ -434,6 +476,7 @@ def main():
     _load_ack_timestamps()
     _load_message_sequence()
     _load_cursors()
+    _load_operation_journal()
     process_session_ctrl_event()
     _write_core_status(1)
     log.info("kernel READY - %d sessions known, %d alive", len(sessions), len(alive_sessions))

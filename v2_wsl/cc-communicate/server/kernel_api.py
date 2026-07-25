@@ -137,7 +137,7 @@ def query_conversations(querier_sid: str) -> dict:
     return result
 
 
-def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: int = 0) -> str:
+def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: int = 0, message_id: str = None) -> str:
     if init_connect:
         # HP-06 destructive containment: conv_dir already validated both ids;
         # re-verify the resolved target is strictly under CONVERSATIONS_DIR and
@@ -148,6 +148,20 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
             shutil.rmtree(target)
         unregister_conversation(alive_conversations, fromid, toid)
         return "conversation withdrawn"
+    if message_id:
+        # HP-03: withdraw an EXPLICIT target (retry-safe). The legacy
+        # latest-message mode below is non-idempotent by nature and remains
+        # for one release only.
+        validation.validate_message_id(message_id)
+        d = conversations.conv_dir(fromid, toid)
+        found = _find_message_file(d, message_id)
+        if not found or os.sep + "log" + os.sep in found:
+            return f"no message {message_id} (already withdrawn or never existed)"
+        try:
+            os.remove(found)
+        except OSError:
+            return f"no message {message_id} (already withdrawn or never existed)"
+        return f"withdrew message {message_id}"
     d = conversations.conv_dir(fromid, toid)
     pipe = os.path.join(d, "pipe")
     try:

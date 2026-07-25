@@ -30,6 +30,7 @@ import conversations
 import message_record
 import spawn
 import machine_identity
+import uuid
 from paths import CONVERSATIONS_DIR, PLUGIN_ROOT, MACHINE_INFO_LOG_DIR
 
 _REVIVE_WAIT = 30.0
@@ -110,10 +111,15 @@ def _register(caller, target, conv_remote):
 
 
 def _send(fromid, toid, message, conv_remote) -> str:
+    # HP-01/HP-03: one message_id per LOGICAL send, generated here so every
+    # funnel (send_message / connect hello / close notice) gets dedup for
+    # free. The rpc layer reuses it as the operation_id, so a transport retry
+    # replays the journaled result and a domain retry dedups on the filename.
+    mid = uuid.uuid4().hex
+    args = {"fromid": fromid, "toid": toid, "message": message, "message_id": mid}
     if conv_remote is None:
-        return rpc_client.call("send_message", {"fromid": fromid, "toid": toid, "message": message})
-    return rpc_client.call_remote(conv_remote, "send_message",
-                                  {"fromid": fromid, "toid": toid, "message": message})
+        return rpc_client.call("send_message", args, operation_id=mid)
+    return rpc_client.call_remote(conv_remote, "send_message", args, operation_id=mid)
 
 
 def _withdraw(fromid, toid, init_connect, conv_remote):

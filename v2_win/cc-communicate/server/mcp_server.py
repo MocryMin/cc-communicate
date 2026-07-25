@@ -108,15 +108,21 @@ def unregister_conversation(sid_a: str, sid_b: str) -> str:
 
 
 @mcp.tool()
-def withdraw(fromid: str, toid: str, init_connect: int = 0) -> str:
+def withdraw(fromid: str, toid: str, init_connect: int = 0,
+             message_id: str = None) -> str:
     """Withdraw a message or whole LOCAL conversation (low-level).
-    init_connect=1: remove the whole folder + unregister; =0: remove fromid's
-    latest undelivered pipe message."""
+    init_connect=1: remove the whole folder + unregister; =0: default legacy
+    mode withdraws fromid's latest undelivered message (non-idempotent).
+    message_id: withdraw that EXACT message (retry-safe; preferred)."""
     err = _entry_error((validation.validate_session_id, fromid),
                        (validation.validate_session_id, toid))
     if err:
         return err
-    return rpc_client.call("withdraw", {"fromid": fromid, "toid": toid, "init_connect": init_connect})
+    if message_id is not None:
+        err2 = _entry_error((validation.validate_message_id, message_id))
+        if err2:
+            return err2
+    return rpc_client.call("withdraw", {"fromid": fromid, "toid": toid, "init_connect": init_connect, "message_id": message_id})
 
 
 @mcp.tool()

@@ -34,9 +34,11 @@ class KernelError(Exception):
 
 # ---------- local kernel ----------
 
-def _submit(function: str, args: dict) -> str:
+def _submit(function: str, args: dict, operation_id: str = None) -> str:
     rid = uuid.uuid4().hex
     req = {"request_id": rid, "function": function, "args": args}
+    if operation_id:
+        req["operation_id"] = operation_id   # HP-03: stable across retries
     name = f"{int(time.time() * 1000):013d}_{rid}.json"
     tmp = os.path.join(QUEUE_DIR, name + ".tmp")
     final = os.path.join(QUEUE_DIR, name)
@@ -63,11 +65,16 @@ def _consume_response(rid: str):
     return resp
 
 
-def call(function: str, args: dict | None = None, timeout: float = _DEFAULT_TIMEOUT):
+def call(function: str, args: dict | None = None, timeout: float = _DEFAULT_TIMEOUT,
+         operation_id: str = None):
     """Call a LOCAL kernel function. Raises KernelError on error/timeout (one
-    retry, core_plan #11c)."""
+    retry, core_plan #11c). HP-03: both attempts share ONE operation_id
+    (generated here when not given) while each gets a fresh request_id, so a
+    retry whose first attempt actually executed replays the journaled result
+    instead of re-running the side effect."""
     if args is None:
         args = {}
+    operation_id = operation_id or uuid.uuid4().hex
     ensure_runtime_dirs()
     last_rid = None
     for attempt in (1, 2):
@@ -76,7 +83,7 @@ def call(function: str, args: dict | None = None, timeout: float = _DEFAULT_TIME
                 raise KernelError("kernel not alive; could not start it")
             time.sleep(_POLL_INTERVAL)
             continue
-        rid = _submit(function, args)
+        rid = _submit(function, args, operation_id)
         last_rid = rid
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -92,11 +99,14 @@ def call(function: str, args: dict | None = None, timeout: float = _DEFAULT_TIME
 
 # ---------- remote kernel (cross-machine) ----------
 
-def _submit_remote(rqueue: str, function: str, args: dict) -> str:
+def _submit_remote(rqueue: str, function: str, args: dict,
+                   operation_id: str = None) -> str:
     from machine_identity import local_type
     prefix = local_type().replace("-", "_")
     rid = f"{prefix}_{uuid.uuid4().hex}"
     req = {"request_id": rid, "function": function, "args": args}
+    if operation_id:
+        req["operation_id"] = operation_id
     name = f"{int(time.time() * 1000):013d}_{rid}.json"
     os.makedirs(rqueue, exist_ok=True)
     tmp = os.path.join(rqueue, name + ".tmp")
@@ -148,18 +158,19 @@ def _wake_remote(machine: dict):
 
 
 def call_remote(machine: dict, function: str, args: dict | None = None,
-                timeout: float = _DEFAULT_TIMEOUT):
+                timeout: float = _DEFAULT_TIMEOUT, operation_id: str = None):
     """Call a function on a REMOTE kernel. On first-window timeout, wake the
     remote kernel and retry once. Returns the result, or None on failure (never
-    raises - callers treat None as 'peer unreachable'). Does NOT ensure_core the
-    local kernel."""
+    raises - callers treat None as 'peer unreachable'). HP-03: attempts share
+    one operation_id. Does NOT ensure_core the local kernel."""
     if args is None:
         args = {}
+    operation_id = operation_id or uuid.uuid4().hex
     ensure_runtime_dirs()
     rqueue = os.path.join(machine["data_dir"], "queue")
     rresp = os.path.join(rqueue, "responses")
     for attempt in (1, 2):
-        rid = _submit_remote(rqueue, function, args)
+        rid = _submit_remote(rqueue, function, args, operation_id)
         window = _REMOTE_FIRST_WINDOW if attempt == 1 else timeout
         deadline = time.monotonic() + window
         while time.monotonic() < deadline:
@@ -174,7 +185,8 @@ def call_remote(machine: dict, function: str, args: dict | None = None,
     return None
 
 
-def submit_remote_noblock(machine: dict, function: str, args: dict | None = None):
+def submit_remote_noblock(machine: dict, function: str, args: dict | None = None,
+                          operation_id: str = None):
     """Fire-and-forget: submit a request to the remote queue WITHOUT polling for a
     response. For best-effort operations (close_connection, C1) where the caller
     must not block on a dead/slow peer. The remote kernel processes the request
@@ -185,6 +197,6 @@ def submit_remote_noblock(machine: dict, function: str, args: dict | None = None
     ensure_runtime_dirs()
     try:
         rqueue = os.path.join(machine["data_dir"], "queue")
-        _submit_remote(rqueue, function, args)
+        _submit_remote(rqueue, function, args, operation_id)
     except Exception:
         pass  # best-effort; never block/raise on a remote write failure

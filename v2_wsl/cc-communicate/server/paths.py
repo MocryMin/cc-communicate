@@ -36,6 +36,7 @@ ACK_TIMESTAMPS_FILE = os.path.join(SERVER_DATA_DIR, 'ack_timestamps.json')  # pe
 MESSAGE_SEQUENCE_FILE = os.path.join(SERVER_DATA_DIR, 'message_sequence.json')  # per-store monotonic counter (HP-01)
 CURSORS_FILE = os.path.join(SERVER_DATA_DIR, 'cursors.json')  # per-sid per-store cursors (HP-02)
 MACHINE_IDENTITY_FILE = os.path.join(SERVER_DATA_DIR, 'machine_identity.json')  # this machine's {type, id, claude_bin}
+OPERATION_JOURNAL_FILE = os.path.join(SERVER_DATA_DIR, 'operation_journal.json')  # HP-03 mutation journal
 TERMINATE_FLAG = os.path.join(SERVER_DATA_DIR, 'terminate.flag')  # kernel_terminate signal (kernel loop checks this)
 
 
