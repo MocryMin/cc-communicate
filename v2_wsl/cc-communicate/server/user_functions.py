@@ -403,15 +403,16 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     return "connect failed, timeout waiting for reply"
 
 
-def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
+def close_connection(session_id: str, toid: str, acked_ts: int = 0,
+                     cursors: dict = None) -> dict:
     """Close the connection to toid (T24: best-effort, non-blocking). Uploads
     the caller's latest ACK watermark to the kernel (persisted, so it survives
-    compact/restart - the CC can recover it via query_my_ACK_timestamp), sends
-    a close notice to the peer (with an instruction to upload its own ts), and
-    unregisters. Does NOT clean up the pipe - per the ts-based ACK design,
-    un-acked messages stay and are archived lazily via the watermark on the next
-    listen (or removed by withdraw). Never raises - a failure here doesn't
-    prevent the caller from leaving."""
+    compact/restart), sends a close notice to the peer, and unregisters. Also
+    uploads per-store cursors when given (HP-02): each cursor goes ONLY to the
+    kernel owning that store; unknown store ids are ignored. Does NOT clean up
+    the pipe - per the ts-based ACK design, un-acked messages stay and are
+    archived lazily via the watermark on the next listen."""
+
     conv_remote = _conv_store(toid)
     notice = ("[CONNECTION CLOSED by " + session_id + "] To close your side and "
               "preserve your message state, call close_connection(your_sid, " +
@@ -422,6 +423,20 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
         rpc_client.call("upload_ack_timestamp", {"sid": session_id, "ts": acked_ts})
     except Exception:
         pass
+    # 1b. upload per-store cursors (HP-02) - each to its owning kernel only
+    if cursors:
+        local_id, host = _store_ids()
+        host_id = host.get("id") if host else None
+        for store_id, seq in cursors.items():
+            try:
+                if store_id == local_id:
+                    rpc_client.call("upload_cursor", {"sid": session_id, "seq": seq})
+                elif host_id and store_id == host_id:
+                    rpc_client.call_remote(host, "upload_cursor",
+                                           {"sid": session_id, "seq": seq})
+                # unknown store ids are ignored by design
+            except Exception:
+                pass
     # 2. notify the peer + unregister (fire-and-forget if the conv is remote)
     try:
         if conv_remote is None:
@@ -439,6 +454,78 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
     except Exception:
         pass  # best-effort: never block the caller's exit on a notify/unregister failure
     return {"closed": True}
+
+
+# ---------- cursor-ACK listening (HP-02; preferred over legacy listen) ----------
+
+def _store_ids():
+    """(local_store_id, host_entry). host_entry is None when we ARE the host
+    (then all our convs are local). The host's store id is its registry id."""
+    local_id = machine_identity.load_or_create().get("id")
+    return local_id, _host_entry()
+
+
+def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
+    """BLOCKING listen with PER-STORE cursors (HP-02). `cursors` maps
+    store_id -> confirmed sequence ({} or None the first time; recover with
+    query_my_cursors after compact/restart). Each store is scanned with ONLY
+    its own cursor - cursors are never merged or compared across stores.
+    Returns {messages, next_cursors}. Cancel-safe: the kernel archives only
+    what you confirmed via the cursors you passed. Persist the messages to
+    YOUR store first, THEN advance cursors (transport receipt != task done).
+    NEVER fall back to the timestamp `listen` once you use cursors."""
+    cursors = dict(cursors or {})
+    local_id, host = _store_ids()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        messages = []
+        next_cursors = dict(cursors)
+        try:
+            r = rpc_client.call("listen_scan_v2",
+                                {"sid": session_id, "cursor": cursors.get(local_id, 0)})
+        except Exception:
+            r = None  # transient kernel issue -> treat as empty, retry
+        if isinstance(r, dict):
+            messages.extend(r.get("messages") or [])
+            nc = r.get("next_cursor", 0)
+            if nc > next_cursors.get(local_id, 0):
+                next_cursors[local_id] = nc
+        if host is not None:
+            hid = host.get("id")
+            rr = rpc_client.call_remote(host, "listen_scan_v2",
+                                        {"sid": session_id, "cursor": cursors.get(hid, 0)})
+            if isinstance(rr, dict):
+                messages.extend(rr.get("messages") or [])
+                nc = rr.get("next_cursor", 0)
+                if nc > next_cursors.get(hid, 0):
+                    next_cursors[hid] = nc
+        if messages:
+            # Display-only sort (created_at_ms is NOT a correctness field);
+            # per-store order is by sequence, cross-store order is undefined.
+            messages.sort(key=lambda m: (m.get("created_at_ms", 0),
+                                         m.get("store_id") or "",
+                                         m.get("sequence", 0)))
+            return {"messages": messages, "next_cursors": next_cursors}
+        time.sleep(_LISTEN_POLL)
+    return {"messages": [], "next_cursors": cursors}
+
+
+def query_my_cursors(session_id: str) -> dict:
+    """Recover your per-store cursors, merged across this machine + the host
+    (each kernel persists only its own store's cursors)."""
+    local_id, host = _store_ids()
+    out = {}
+    try:
+        r = rpc_client.call("query_cursors", {"sid": session_id})
+    except Exception:
+        r = None
+    if isinstance(r, dict):
+        out.update(r)
+    if host is not None:
+        rr = rpc_client.call_remote(host, "query_cursors", {"sid": session_id})
+        if isinstance(rr, dict):
+            out.update(rr)
+    return out
 
 
 def query_my_ACK_timestamp(session_id: str) -> int:

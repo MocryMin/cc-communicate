@@ -34,6 +34,7 @@ SESSIONS_FILE       = os.path.join(SERVER_DATA_DIR, 'sessions.json')  # persiste
 ALIVE_CONVS_FILE    = os.path.join(SERVER_DATA_DIR, 'alive_conversations.json')  # persistent conv registrations (R2)
 ACK_TIMESTAMPS_FILE = os.path.join(SERVER_DATA_DIR, 'ack_timestamps.json')  # per-sid ACK watermark (T24, persisted on close/exit)
 MESSAGE_SEQUENCE_FILE = os.path.join(SERVER_DATA_DIR, 'message_sequence.json')  # per-store monotonic counter (HP-01)
+CURSORS_FILE = os.path.join(SERVER_DATA_DIR, 'cursors.json')  # per-sid per-store cursors (HP-02)
 MACHINE_IDENTITY_FILE = os.path.join(SERVER_DATA_DIR, 'machine_identity.json')  # this machine's {type, id, claude_bin}
 TERMINATE_FLAG = os.path.join(SERVER_DATA_DIR, 'terminate.flag')  # kernel_terminate signal (kernel loop checks this)
 

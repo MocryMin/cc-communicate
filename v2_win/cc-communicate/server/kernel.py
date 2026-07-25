@@ -31,7 +31,7 @@ import validation
 from paths import (
     CONVERSATIONS_DIR, CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
-    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, ensure_runtime_dirs,
+    ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
@@ -49,6 +49,7 @@ alive_sessions: dict = {}
 alive_conversations: dict = {}
 acked_timestamps: dict = {}  # T24: sid -> latest confirmed ACK watermark (persisted)
 message_sequence: dict = {}  # HP-01: {"schema_version","store_id","last_allocated"}
+cursors: dict = {}  # HP-02: sid -> {store_id: confirmed sequence} (persisted)
 _local_store_id: str = "unknown"
 _last_activity: float = 0.0
 
@@ -162,6 +163,30 @@ def _load_message_sequence():
 
 def _save_message_sequence():
     _atomic_write_json(MESSAGE_SEQUENCE_FILE, message_sequence)
+
+
+def _load_cursors():
+    """Reload per-sid per-store cursors (HP-02). Fresh start when absent -
+    cursor state is NEVER converted from legacy ack_timestamps (explicit
+    migration point)."""
+    data = _read_json(CURSORS_FILE)
+    if not isinstance(data, dict):
+        return
+    sessions_data = data.get("sessions")
+    if not isinstance(sessions_data, dict):
+        return
+    for sid, per in sessions_data.items():
+        if not isinstance(per, dict):
+            continue
+        clean = {str(k): int(v) for k, v in per.items()
+                 if isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+        if clean:
+            cursors[sid] = clean
+    log.info("loaded cursors.json: %d sids", len(cursors))
+
+
+def _save_cursors():
+    _atomic_write_json(CURSORS_FILE, {"schema_version": 1, "sessions": cursors})
 
 
 def process_session_ctrl_event() -> bool:
@@ -285,6 +310,9 @@ _ARG_VALIDATORS = {
                         "cwd": validation.validate_cwd},
     "create_conversation_folder": {"id1": validation.validate_session_id,
                                    "id2": validation.validate_session_id},
+    "listen_scan_v2": {"sid": validation.validate_session_id},
+    "query_cursors": {"sid": validation.validate_session_id},
+    "upload_cursor": {"sid": validation.validate_session_id},
 }
 
 
@@ -324,6 +352,14 @@ def _dispatch(function: str, args: dict):
         return kernel_api.query_ack_timestamp(acked_timestamps, args["sid"])
     if function == "upload_ack_timestamp":
         return kernel_api.upload_ack_timestamp(acked_timestamps, args["sid"], args.get("ts", 0))
+    if function == "listen_scan_v2":
+        return kernel_api.listen_scan_v2(cursors, _local_store_id, args["sid"],
+                                         args.get("cursor", 0))
+    if function == "query_cursors":
+        return kernel_api.query_cursors(cursors, args["sid"])
+    if function == "upload_cursor":
+        return kernel_api.upload_cursor(cursors, _local_store_id, args["sid"],
+                                        args.get("seq", 0))
     if function == "session_by_pid":
         return kernel_api.session_by_pid(sessions, args["pid"])
     if function == "find_new_session":
@@ -397,6 +433,7 @@ def main():
     _load_alive_convs()
     _load_ack_timestamps()
     _load_message_sequence()
+    _load_cursors()
     process_session_ctrl_event()
     _write_core_status(1)
     log.info("kernel READY - %d sessions known, %d alive", len(sessions), len(alive_sessions))
@@ -436,6 +473,7 @@ def main():
         _save_alive_convs()
         _save_ack_timestamps()  # T24: persist in-memory listen_scan updates
         _save_message_sequence()
+        _save_cursors()
         log.info("kernel exited")
 
 

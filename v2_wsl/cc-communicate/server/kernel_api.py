@@ -25,7 +25,7 @@ import os
 import shutil
 import time
 
-from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE
+from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE
 from proc import proc_start_time
 import conversations
 import fileutil
@@ -416,3 +416,93 @@ def find_new_session(sessions: dict, cwd: str, since_ts):
             best_ts = started
             best = sid
     return best
+
+
+# ---------- listening: per-store cursor ACK (HP-02) ----------
+# Cursor semantics: a cursor says "the caller has DURABLY received everything
+# up to this sequence FROM THIS STORE" - transport-level receipt, NOT upper-
+# layer task completion. Archive rule is ONLY:
+#     record.store_id == this store AND record.sequence <= cursor[this store]
+# Never compare sequences across stores; never use created_at_ms for
+# correctness. Legacy .md files are INVISIBLE here (explicit migration point:
+# v0.3 in-flight messages drain via the legacy listen during the deprecation
+# window; cursor state never converts old timestamps).
+
+def listen_scan_v2(cursors_state: dict, store_id: str, sid: str, acked_seq: int) -> dict:
+    """Atomic (kernel-thread) per-store cursor scan. acked_seq is the caller's
+    confirmed cursor FOR THIS STORE. Archives confirmed records (pipe->log),
+    peeks newer ones (no archive), updates the in-memory cursor map (persisted
+    on upload/close/exit). Cancel-safe: only what a PRIOR call confirmed is
+    archived."""
+    try:
+        acked_seq = int(acked_seq or 0)
+    except (TypeError, ValueError):
+        raise validation.InvalidArgumentError(f"cursor must be an int; got {acked_seq!r}")
+    if acked_seq < 0:
+        raise validation.InvalidArgumentError(f"cursor must be >= 0; got {acked_seq}")
+    per = cursors_state.setdefault(sid, {})
+    if acked_seq > per.get(store_id, 0):
+        per[store_id] = acked_seq
+    messages = []
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        return {"store_id": store_id, "messages": [], "next_cursor": acked_seq}
+    for name in entries:
+        parts = name.split(conversations.SEP)
+        if len(parts) != 2 or sid not in parts:
+            continue
+        pipe = os.path.join(CONVERSATIONS_DIR, name, "pipe")
+        log = os.path.join(CONVERSATIONS_DIR, name, "log")
+        if not os.path.isdir(pipe):
+            continue
+        for fname in os.listdir(pipe):
+            info = conversations.parse_any_pipe_filename(fname)
+            if not info or info["format"] != "record" or info["to_id"] != sid:
+                continue  # legacy .md invisible to v2 (migration point)
+            src = os.path.join(pipe, fname)
+            rec = message_record.read_record(src)
+            if not rec:
+                continue  # C5: skip malformed/partial
+            seq = rec.get("sequence")
+            if not isinstance(seq, int):
+                continue
+            if seq <= acked_seq:
+                os.makedirs(log, exist_ok=True)
+                try:
+                    os.replace(src, os.path.join(log, fname))
+                except OSError:
+                    pass
+                continue
+            messages.append(rec)
+    messages.sort(key=lambda r: r["sequence"])
+    next_cursor = max([m["sequence"] for m in messages], default=acked_seq)
+    return {"store_id": store_id, "messages": messages, "next_cursor": next_cursor}
+
+
+def query_cursors(cursors_state: dict, sid: str) -> dict:
+    """This kernel's stored cursor map for sid (usually one store entry - each
+    kernel persists only cursors for ITS OWN store). user_functions merges
+    across machines."""
+    return dict(cursors_state.get(sid, {}))
+
+
+def upload_cursor(cursors_state: dict, store_id: str, sid: str, seq: int) -> dict:
+    """Persist the caller's cursor for THIS store (max-merge; never regresses).
+    Written through to cursors.json immediately (close is infrequent), so it
+    survives a later kernel crash. Returns sid's stored map for this kernel."""
+    try:
+        seq = int(seq or 0)
+    except (TypeError, ValueError):
+        raise validation.InvalidArgumentError(f"cursor must be an int; got {seq!r}")
+    if seq < 0:
+        raise validation.InvalidArgumentError(f"cursor must be >= 0; got {seq}")
+    per = cursors_state.setdefault(sid, {})
+    if seq > per.get(store_id, 0):
+        per[store_id] = seq
+    try:
+        fileutil.atomic_write_json(
+            CURSORS_FILE, {"schema_version": 1, "sessions": cursors_state})
+    except OSError:
+        pass
+    return dict(per)

@@ -13,7 +13,32 @@ new collaborator sessions. Works within one machine AND across the Windows host
 CC exposes each tool as `mcp__plugin_cc-communicate_cc-communicate__<tool>`;
 call them by the short names below.
 
-## The ACK watermark (read this before listening)
+## The cursor ACK (v2 — PREFERRED; read this before listening)
+
+`listen_v2` ACKs with **per-store cursors**, not timestamps. A cursor says
+"everything up to this sequence FROM THIS STORE is durably received".
+
+- **First listen_v2**: call `query_my_cursors(sid)` (or pass `{}`) to get
+  `{store_id: sequence}`, then `listen_v2(sid, cursors, timeout)`.
+- It returns `{messages, next_cursors}`. Each message is a record:
+  `{message_id, store_id, sequence, from_session, to_session, kind,
+  correlation_id, created_at_ms, payload: {text}}`.
+- **Persist first, then advance**: write the messages to your own store /
+  context BEFORE passing the advanced `next_cursors` back. A cursor means
+  "durably received", NOT "task done".
+- **Next listen_v2**: pass the returned `next_cursors` unchanged. NEVER mix
+  cursor values between stores, NEVER reduce them to one number, and NEVER
+  fall back to the timestamp `listen` once you use cursors (that silently
+  re-enables cross-store mis-archiving).
+- **Duplicates are possible** (at-least-once): dedup on `message_id`.
+- **If you lose your cursors** (compact / long gap / restart): call
+  `query_my_cursors(sid)`.
+- **On close**: pass your latest cursors to `close_connection(sid, toid,
+  cursors=...)` so the kernels persist them.
+- The legacy timestamp `listen` below remains for ONE release to drain
+  pre-upgrade `.md` messages; do not use it for new conversations.
+
+## The ACK watermark (LEGACY timestamp mode — being phased out; use the cursor ACK above for new work)
 
 `listen` uses a **timestamp ACK** so an interrupted listen never loses messages.
 You keep one number - the `watermark` - and pass it back on each listen:
@@ -91,24 +116,30 @@ loss when a human interrupts mid-conversation.
   on (local or remote peer). Same session_id resumed. connect calls this
   automatically when the target is dead.
 
-### Listening (timestamp ACK - see "The ACK watermark" above)
-- `listen(session_id, acked_ts=0, timeout=30) -> dict` - BLOCKING. Returns
-  `{messages, watermark}`. Pass 0 the first time; pass the returned `watermark`
-  on every later call. The kernel's scan is atomic (single-threaded) and
-  archives only what you've confirmed (ts ≤ acked_ts) - an interrupted listen
-  loses nothing. Call in a loop until `close_connection`.
-- `query_my_ACK_timestamp(session_id) -> int` - Recover your latest watermark
-  from the kernel after a compact / long gap / restart. Use it as `acked_ts`.
+### Listening (cursor ACK v2 preferred — see "The cursor ACK" above)
+- `listen_v2(session_id, cursors=None, timeout=30) -> dict` - **PREFERRED.**
+  BLOCKING. Returns `{messages, next_cursors}`; pass `next_cursors` back
+  unchanged on the next call. Each message is a record envelope. See "The
+  cursor ACK" above for the contract.
+- `query_my_cursors(session_id) -> dict` - Recover `{store_id: sequence}`
+  after compact / restart. Pass the result as `cursors` on your next
+  `listen_v2`.
+- `listen(session_id, acked_ts=0, timeout=30) -> dict` - LEGACY timestamp
+  ACK. Kept one release to drain pre-upgrade `.md` messages. Returns
+  `{messages, watermark}`. Do NOT use for new conversations.
+- `query_my_ACK_timestamp(session_id) -> int` - LEGACY. Recover your
+  timestamp watermark after a compact / long gap / restart. Prefer
+  `query_my_cursors`.
 
 ### Orchestration
 - `connect(caller_sid, target_sid, hold_time=300) -> str` - Establish p2p (local
   or cross-realm). Query -> check_alive -> evoke+wait if dead -> register ->
   send hello -> in-process wait for reply. Returns `"connect succeed; reply:
   ..."` or a `"failed, ..."` / `"connect failed, ..."` string.
-- `close_connection(session_id, toid, acked_ts=0) -> dict` - Uploads your
-  watermark (persisted), sends the close notice (telling the peer to upload its
-  ts), unregisters. Does NOT clean up the pipe (ts-based ACK). Returns
-  `{closed: True}`.
+- `close_connection(session_id, toid, acked_ts=0, cursors=None) -> dict` -
+  Uploads your watermark and/or per-store cursors (persisted), sends the close
+  notice (telling the peer to upload its ts), unregisters. Does NOT clean up
+  the pipe (ts-based/cursor ACK). Returns `{closed: True}`.
 - `create_collaborator(caller_sid, cwd, hold_time=300, machine=None) -> str` -
   Spawn a NEW CC in cwd (on `machine` if given, else local), poll until
   registered, then connect.

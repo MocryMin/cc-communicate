@@ -131,19 +131,37 @@ def evoke(session_id: str) -> str:
 
 @mcp.tool()
 def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
-    """BLOCKING: wait up to `timeout` seconds for undelivered messages addressed
+    """LEGACY (deprecation window): prefer listen_v2.
+    BLOCKING: wait up to `timeout` seconds for undelivered messages addressed
     to session_id, then return `{messages, watermark}` (messages possibly empty
     on timeout). Pass 0 as acked_ts the FIRST time; on every later call pass the
-    `watermark` the previous listen returned. The kernel archives only messages
-    you've confirmed (ts <= acked_ts) - so a cancelled/interrupted listen never
-    loses messages (they re-deliver next time). CALL THIS IN A LOOP: after it
-    returns, process any messages, then call listen again with the latest
-    watermark - keep a listener active until you call close_connection. Never
-    invoke listen.py directly or write your own shell listener."""
+    `watermark` the previous listen returned. CALL THIS IN A LOOP until
+    close_connection. Never invoke listen.py directly or write your own shell
+    listener."""
     err = _entry_error((validation.validate_session_id, session_id))
     if err:
         return err
     return user_functions.listen(session_id, acked_ts, timeout)
+
+
+@mcp.tool()
+def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
+    """BLOCKING listen with PER-STORE cursors (PREFERRED over legacy listen).
+    Pass {} (or query_my_cursors) the first time; on every later call pass the
+    `next_cursors` the previous listen_v2 returned - unchanged. Returns
+    {messages, next_cursors}. Each message is a record: {message_id, store_id,
+    sequence, from_session, to_session, kind, correlation_id, created_at_ms,
+    payload:{text}}. Dedup on message_id if you see repeats (at-least-once).
+    IMPORTANT: persist the messages to your own store BEFORE you pass the
+    advanced cursors back - a cursor means "durably received", not "task
+    done". NEVER mix cursor values between stores, and NEVER fall back to the
+    timestamp `listen` once you use cursors (silent cross-store mis-archiving
+    would return)."""
+    err = _entry_error((validation.validate_session_id, session_id),
+                       (validation.validate_cursors, cursors))
+    if err:
+        return {"messages": [], "next_cursors": {}, "error": err}
+    return user_functions.listen_v2(session_id, cursors, timeout)
 
 
 @mcp.tool()
@@ -165,33 +183,45 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
 
 
 @mcp.tool()
-def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
+def close_connection(session_id: str, toid: str, acked_ts: int = 0,
+                     cursors: dict = None) -> dict:
     """Terminate the connection to toid (the ONLY way to stop your listen loop).
-    Pass your latest `watermark` as acked_ts - the kernel persists it so you (or
-    a revived you) can recover it via query_my_ACK_timestamp. Best-effort and
-    non-blocking: uploads your watermark, sends a '[CONNECTION CLOSED by <sid>]'
-    notice (which tells the peer to upload its own ts) and unregisters, then
-    returns `{closed: True}` immediately. Does NOT clean up the pipe (ts-based
-    ACK: un-acked messages stay; archived lazily via the watermark). Safe to
-    call even if the peer is unreachable. After this returns you may stop
-    listening and exit."""
+    Pass your latest `watermark` as acked_ts and/or your per-store cursors
+    (from listen_v2 / query_my_cursors). Each cursor is uploaded only to the
+    kernel that owns that store. Best-effort and non-blocking: returns
+    `{closed: True}` immediately. Does NOT clean up the pipe (ts-based/cursor
+    ACK: un-acked messages stay). Safe to call even if the peer is
+    unreachable. After this returns you may stop listening and exit."""
     err = _entry_error((validation.validate_session_id, session_id),
-                       (validation.validate_session_id, toid))
+                       (validation.validate_session_id, toid),
+                       (validation.validate_cursors, cursors))
     if err:
         return err
-    return user_functions.close_connection(session_id, toid, acked_ts)
+    return user_functions.close_connection(session_id, toid, acked_ts, cursors)
 
 
 @mcp.tool()
 def query_my_ACK_timestamp(session_id: str) -> int:
-    """Recover your latest ACK watermark from the kernel (the one you last passed
-    to listen or close_connection). Call this after a compact / long gap /
-    kernel restart if you've lost the watermark, then use the returned value as
-    `acked_ts` on your next listen. Returns 0 if none is recorded."""
+    """LEGACY: prefer query_my_cursors. Recover your latest ACK watermark from
+    the kernel (the one you last passed to listen or close_connection). Call
+    this after a compact / long gap / kernel restart if you've lost the
+    watermark, then use the returned value as `acked_ts` on your next listen.
+    Returns 0 if none is recorded."""
     err = _entry_error((validation.validate_session_id, session_id))
     if err:
         return err
     return user_functions.query_my_ACK_timestamp(session_id)
+
+
+@mcp.tool()
+def query_my_cursors(session_id: str) -> dict:
+    """Recover your per-store cursors ({store_id: sequence}) from the kernels
+    (local + host merged). Call after a compact / long gap / kernel restart,
+    then pass the result as `cursors` on your next listen_v2."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return {"error": err}
+    return user_functions.query_my_cursors(session_id)
 
 
 @mcp.tool()
