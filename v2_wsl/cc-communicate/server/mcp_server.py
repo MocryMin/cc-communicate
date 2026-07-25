@@ -18,8 +18,22 @@ from mcp.server.fastmcp import FastMCP
 
 import rpc_client
 import user_functions
+import validation
 
 mcp = FastMCP("cc-communicate")
+
+
+def _entry_error(*checks):
+    """Run MCP-entry validators (HP-06). `checks` are (validator, value) pairs.
+    Returns the INVALID_ARGUMENT error string, or None when all pass. Kernel
+    dispatch validates again - defense in depth, and remote RPC never passes
+    through here."""
+    try:
+        for validator, value in checks:
+            validator(value)
+    except validation.InvalidArgumentError as e:
+        return str(e)
+    return None
 
 
 @mcp.tool()
@@ -33,6 +47,9 @@ def my_session_id() -> str:
 def query_session(session_id: str) -> dict:
     """Look up a session by id (local kernel first, then registered peer
     machines). Returns session_inf or null if unknown everywhere."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return err
     return user_functions.query_session(session_id)
 
 
@@ -40,6 +57,9 @@ def query_session(session_id: str) -> dict:
 def check_alive(session_id: str) -> int:
     """1 if the session is truly alive (pid + start_time verified) on this
     machine or any registered peer; 0 otherwise."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return err
     return user_functions.check_alive(session_id)
 
 
@@ -47,6 +67,9 @@ def check_alive(session_id: str) -> int:
 def query_conversations(session_id: str) -> dict:
     """Conversation partners for session_id, merged across this machine + peers:
     {partner_sid: {...info}, ...}. Includes ended-but-not-withdrawn."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return err
     return user_functions.query_conversations(session_id)
 
 
@@ -55,6 +78,11 @@ def send_message(fromid: str, toid: str, message: str) -> str:
     """Send a message to a peer's pipe. Routes to the conversation store (host
     for cross-machine, else local). The conversation must be registered
     (normally via connect) first, else returns a failure string."""
+    err = _entry_error((validation.validate_session_id, fromid),
+                       (validation.validate_session_id, toid),
+                       (validation.validate_message_size, message))
+    if err:
+        return err
     return user_functions.send_message(fromid, toid, message)
 
 
@@ -62,12 +90,20 @@ def send_message(fromid: str, toid: str, message: str) -> str:
 def register_conversation(sid_a: str, sid_b: str) -> str:
     """Mark a LOCAL conversation active (low-level; connect handles routing).
     Exposed for bootstrapping/testing."""
+    err = _entry_error((validation.validate_session_id, sid_a),
+                       (validation.validate_session_id, sid_b))
+    if err:
+        return err
     return rpc_client.call("register_conversation", {"sid_a": sid_a, "sid_b": sid_b})
 
 
 @mcp.tool()
 def unregister_conversation(sid_a: str, sid_b: str) -> str:
     """Mark a LOCAL conversation inactive (low-level)."""
+    err = _entry_error((validation.validate_session_id, sid_a),
+                       (validation.validate_session_id, sid_b))
+    if err:
+        return err
     return rpc_client.call("unregister_conversation", {"sid_a": sid_a, "sid_b": sid_b})
 
 
@@ -76,6 +112,10 @@ def withdraw(fromid: str, toid: str, init_connect: int = 0) -> str:
     """Withdraw a message or whole LOCAL conversation (low-level).
     init_connect=1: remove the whole folder + unregister; =0: remove fromid's
     latest undelivered pipe message."""
+    err = _entry_error((validation.validate_session_id, fromid),
+                       (validation.validate_session_id, toid))
+    if err:
+        return err
     return rpc_client.call("withdraw", {"fromid": fromid, "toid": toid, "init_connect": init_connect})
 
 
@@ -83,6 +123,9 @@ def withdraw(fromid: str, toid: str, init_connect: int = 0) -> str:
 def evoke(session_id: str) -> str:
     """Revive a dead CC session on whatever machine it lives on (local or remote
     peer). Returns 'evoke spawned (resumed)' or 'failed, session not exists'."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return err
     return user_functions.evoke(session_id)
 
 
@@ -97,6 +140,9 @@ def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
     returns, process any messages, then call listen again with the latest
     watermark - keep a listener active until you call close_connection. Never
     invoke listen.py directly or write your own shell listener."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return err
     return user_functions.listen(session_id, acked_ts, timeout)
 
 
@@ -111,6 +157,10 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     succeeds the channel is ESTABLISHED: you MUST then call listen in a loop
     (passing the watermark each call - see the listen tool) and keep it active
     until you call close_connection."""
+    err = _entry_error((validation.validate_session_id, caller_sid),
+                       (validation.validate_session_id, target_sid))
+    if err:
+        return err
     return user_functions.connect(caller_sid, target_sid, hold_time)
 
 
@@ -125,6 +175,10 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0) -> dict:
     ACK: un-acked messages stay; archived lazily via the watermark). Safe to
     call even if the peer is unreachable. After this returns you may stop
     listening and exit."""
+    err = _entry_error((validation.validate_session_id, session_id),
+                       (validation.validate_session_id, toid))
+    if err:
+        return err
     return user_functions.close_connection(session_id, toid, acked_ts)
 
 
@@ -134,6 +188,9 @@ def query_my_ACK_timestamp(session_id: str) -> int:
     to listen or close_connection). Call this after a compact / long gap /
     kernel restart if you've lost the watermark, then use the returned value as
     `acked_ts` on your next listen. Returns 0 if none is recorded."""
+    err = _entry_error((validation.validate_session_id, session_id))
+    if err:
+        return err
     return user_functions.query_my_ACK_timestamp(session_id)
 
 
@@ -144,6 +201,10 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
     else this machine) and connect to it. The new CC loads the plugin and
     listens; this tool waits for it to register, then connects. Returns
     connect's result, or 'failed' if it doesn't register within 30s."""
+    err = _entry_error((validation.validate_session_id, caller_sid),
+                       (validation.validate_cwd, cwd))
+    if err:
+        return err
     return user_functions.create_collaborator(caller_sid, cwd, hold_time, machine)
 
 

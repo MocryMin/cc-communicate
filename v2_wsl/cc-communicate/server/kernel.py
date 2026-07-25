@@ -26,6 +26,7 @@ import time
 
 import kernel_api
 import machine_identity
+import validation
 from paths import (
     CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
@@ -220,7 +221,44 @@ def drain_queue() -> bool:
     return bool(reqs)
 
 
+# HP-06: per-function arg validators applied at the dispatch trust boundary.
+# Covers local AND remote RPC (a peer's call_remote lands in this same queue).
+# Validators run only on args that are present and non-None; required-ness is
+# still enforced by the args["..."] lookups below.
+_ARG_VALIDATORS = {
+    "query_session": {"session_id": validation.validate_session_id},
+    "check_alive": {"session_id": validation.validate_session_id},
+    "query_conversations": {"session_id": validation.validate_session_id},
+    "send_message": {"fromid": validation.validate_session_id,
+                     "toid": validation.validate_session_id,
+                     "message": validation.validate_message_size},
+    "register_conversation": {"sid_a": validation.validate_session_id,
+                              "sid_b": validation.validate_session_id},
+    "unregister_conversation": {"sid_a": validation.validate_session_id,
+                                "sid_b": validation.validate_session_id},
+    "withdraw": {"fromid": validation.validate_session_id,
+                 "toid": validation.validate_session_id},
+    "evoke": {"session_id": validation.validate_session_id},
+    "collect_messages": {"session_id": validation.validate_session_id},
+    "listen_scan": {"sid": validation.validate_session_id},
+    "query_ack_timestamp": {"sid": validation.validate_session_id},
+    "upload_ack_timestamp": {"sid": validation.validate_session_id},
+    "spawn_cc_new": {"cwd": validation.validate_cwd},
+    "spawn_cc_resume": {"session_id": validation.validate_session_id,
+                        "cwd": validation.validate_cwd},
+    "create_conversation_folder": {"id1": validation.validate_session_id,
+                                   "id2": validation.validate_session_id},
+}
+
+
+def _validate_args(function: str, args: dict):
+    for arg, validator in _ARG_VALIDATORS.get(function, {}).items():
+        if arg in args and args[arg] is not None:
+            validator(args[arg])
+
+
 def _dispatch(function: str, args: dict):
+    _validate_args(function, args)
     if function == "query_session":
         return kernel_api.query_session(sessions, args["session_id"])
     if function == "check_alive":

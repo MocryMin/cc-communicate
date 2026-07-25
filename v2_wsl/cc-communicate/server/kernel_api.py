@@ -29,6 +29,7 @@ from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMP
 from proc import proc_start_time
 import conversations
 import spawn
+import validation
 
 
 def _atomic_write_json(path: str, obj):
@@ -107,9 +108,13 @@ def query_conversations(querier_sid: str) -> dict:
 
 def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: int = 0) -> str:
     if init_connect:
+        # HP-06 destructive containment: conv_dir already validated both ids;
+        # re-verify the resolved target is strictly under CONVERSATIONS_DIR and
+        # IS the canonical pair dir before rmtree.
         d = conversations.conv_dir(fromid, toid)
-        if os.path.isdir(d):
-            shutil.rmtree(d)
+        target = validation.resolve_under(CONVERSATIONS_DIR, os.path.basename(d))
+        if os.path.isdir(target):
+            shutil.rmtree(target)
         unregister_conversation(alive_conversations, fromid, toid)
         return "conversation withdrawn"
     d = conversations.conv_dir(fromid, toid)

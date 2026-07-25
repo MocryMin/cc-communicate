@@ -39,14 +39,15 @@ def main() -> int:
             print("PARITY FAIL: %s tree is not an existing directory: %s" % (name, tree))
             return 1
     win, wsl = _files(WIN), _files(WSL)
-    if not win and not wsl:
-        print("PARITY FAIL: 0 files found in either tree - refusing to pass "
-              "having compared nothing (trees: %s, %s)" % (WIN, WSL))
+    compared = [rel for rel in sorted(set(win) | set(wsl)) if rel not in ALLOWLIST]
+    if not compared:
+        # Vacuous-pass guard: covers empty trees AND trees reduced to only
+        # allowlisted files (0 meaningful compares must never print OK).
+        print("PARITY FAIL: 0 non-allowlisted files to compare - refusing to "
+              "pass having compared nothing (trees: %s, %s)" % (WIN, WSL))
         return 1
     problems = []
-    for rel in sorted(set(win) | set(wsl)):
-        if rel in ALLOWLIST:
-            continue
+    for rel in compared:
         if rel not in win:
             problems.append("only in wsl: " + rel)
         elif rel not in wsl:
@@ -58,7 +59,7 @@ def main() -> int:
         for p in problems:
             print("  " + p)
         return 1
-    print("PARITY OK (%d files compared, allowlist=%s)" % (len(win), sorted(ALLOWLIST)))
+    print("PARITY OK (%d files compared, allowlist=%s)" % (len(compared), sorted(ALLOWLIST)))
     return 0
 
 

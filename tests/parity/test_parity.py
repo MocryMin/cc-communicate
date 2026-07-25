@@ -25,3 +25,18 @@ def test_parity_fails_on_empty_trees(tmp_path, monkeypatch):
     monkeypatch.setattr(check_parity, "WIN", win)
     monkeypatch.setattr(check_parity, "WSL", wsl)
     assert check_parity.main() == 1
+
+
+def test_parity_fails_when_only_allowlisted_files(tmp_path, monkeypatch):
+    """Both trees reduced to only-allowlisted files -> 0 meaningful compares
+    -> FAIL (carry-forward: the old len(win) count included allowlisted files)."""
+    sys.path.insert(0, str(TOOLS))
+    import check_parity
+    win, wsl = tmp_path / "win", tmp_path / "wsl"
+    win.mkdir()
+    wsl.mkdir()
+    (win / ".mcp.json").write_text("{}")
+    (wsl / ".mcp.json").write_text("{}")
+    monkeypatch.setattr(check_parity, "WIN", win)
+    monkeypatch.setattr(check_parity, "WSL", wsl)
+    assert check_parity.main() == 1

@@ -23,14 +23,16 @@ from __future__ import annotations
 import os
 
 from paths import CONVERSATIONS_DIR
+from validation import validate_session_id
 
 SEP = "__"
 
 
 def conv_dir(sid_a: str, sid_b: str) -> str:
     """Canonical conversation directory for the pair (order-independent: the
-    two sids are sorted before joining)."""
-    a, b = sorted([sid_a, sid_b])
+    two sids are sorted before joining). Validates both ids (HP-06) - no path
+    is ever built from an unvalidated id."""
+    a, b = sorted([validate_session_id(sid_a), validate_session_id(sid_b)])
     return os.path.join(CONVERSATIONS_DIR, a + SEP + b)
 
 
@@ -52,7 +54,9 @@ def ensure_conv_dir(sid_a: str, sid_b: str) -> str:
 
 def pipe_filename(fromid: str, toid: str, ts: int) -> str:
     """Filename for a pipe message: <ts:013d>__<fromid>__<toid>.md.
-    ts-first so lex sort = chronological."""
+    ts-first so lex sort = chronological. Validates ids (HP-06)."""
+    validate_session_id(fromid)
+    validate_session_id(toid)
     return f"{int(ts):013d}{SEP}{fromid}{SEP}{toid}.md"
 
 

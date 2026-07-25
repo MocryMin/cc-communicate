@@ -27,6 +27,7 @@ def server(tmp_path, monkeypatch):
     暴露重载后的模块与该 root。kernel_api 函数以 state dict 为首参，直接调用即可。"""
     monkeypatch.setenv("CC_COMMUNICATE_DATA_DIR", str(tmp_path))
     mods = {}
-    for name in ("paths", "conversations", "spawn", "kernel_api", "kernel"):
+    for name in ("paths", "result", "validation", "proc", "conversations",
+                 "spawn", "machine_identity", "kernel_api", "kernel"):
         mods[name] = importlib.reload(importlib.import_module(name))
     return SimpleNamespace(data_root=tmp_path, **mods)

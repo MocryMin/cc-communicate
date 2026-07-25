@@ -51,7 +51,10 @@ def parse_start_time(s) -> float | None:
         if t.endswith("Z"):
             t = t[:-1] + "+00:00"
         return datetime.fromisoformat(t).timestamp()
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
+        # AttributeError: non-str truthy input (e.g. a float epoch) has no
+        # .strip() - treat as unparseable instead of crashing (Wave 1
+        # hardening; today's producers write ISO strings or null only).
         return None
 
 
