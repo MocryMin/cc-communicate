@@ -811,3 +811,26 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   (3 tests in tests/unit/test_validation.py) → full suite + parity → L3 re-run.
 - **Confidence**: high — live repro exact; entry rule now matches the
   validation authority split (local entry, peer entry re-validates).
+
+### T32 — L3 live gate finding: headless WSL kernel has no claude_bin → spawn falls back to interop Windows claude (FIXED)
+
+- **Bug**: host->WSL create_collaborator spawned the WSL CC but it never
+  registered (failed, new session did not register within 30s). The WSL kernel
+  was started headless (host wake), so machine_identity._detect_claude_bin's
+  ancestor walk found no claude -> claude_bin null -> spawn._claude_bin fell
+  back to bare `claude`, which on WSL resolves to the interop WINDOWS claude.exe
+  (C13; /mnt/c/Users/Mocry/AppData/Roaming/npm is on the WSL PATH) - whose
+  SessionStart hooks are Windows-side, so no start event landed on the WSL
+  kernel. A native WSL claude exists at ~/.npm-global/bin/claude. Additionally,
+  load_or_create only upgraded identity when the claude_bin KEY was missing -
+  a persisted null stayed null forever.
+- **Fix**: machine_identity._native_linux_claude() filesystem search (static
+  candidates ~/.npm-global/bin, ~/.local/bin, /usr/local/bin + npm-prefix
+  derived, rejecting /mnt/ interop paths) as the fallback in _detect_claude_bin;
+  load_or_create re-detects a null claude_bin on Linux. Covers both realms.
+- **Method**: live repro (L3 gate: host->WSL spawn, tmux cmdline shows the
+  interop claude.exe) → TDD (4 tests in
+  tests/unit/test_machine_identity_claude_bin.py) → full suite + parity →
+  L3 re-run.
+- **Confidence**: high — mechanism evidenced from the live tmux cmdline +
+  WSL PATH + identity file; unit tests lock search/reject/upgrade semantics.

@@ -38,17 +38,64 @@ def detect_type() -> str:
 
 
 def _detect_claude_bin() -> str | None:
-    """Absolute path to this process's claude binary ancestor (Linux), or None.
+    """Absolute path to this process's claude binary ancestor (Linux), or a
+    native Linux claude found by filesystem search (T32: a headless-started
+    kernel has no claude ancestor), or None.
 
     On WSL, `which claude` returns the Windows version (C13); the Linux claude
     lives at e.g. /home/<user>/.npm-global/bin/claude and is not on the default
     PATH. We resolve it from our own process tree (we are a descendant of the
-    claude that launched us)."""
+    claude that launched us) - and fall back to the filesystem search when the
+    tree has no claude (headless kernel)."""
     if os.name == "nt":
         return None
     # Imported lazily to avoid any import-cycle at module load.
     from proc import claude_binary_path
-    return claude_binary_path(os.getpid())
+    found = claude_binary_path(os.getpid())
+    if found:
+        return found
+    return _native_linux_claude()
+
+
+# T32: when the kernel is started headless (host wake / lazy-start from a
+# non-CC process) it has NO claude ancestor, so the ancestor walk finds
+# nothing and claude_bin stays null; spawn then falls back to bare `claude`,
+# which on WSL resolves to the interop WINDOWS claude.exe (C13) - whose hooks
+# are Windows-side, so the spawned session never registers on the WSL kernel.
+# These are the common native Linux install locations (verified live:
+# /home/<user>/.npm-global/bin/claude).
+_LINUX_CLAUDE_CANDIDATES = (
+    "~/.npm-global/bin/claude",
+    "~/.local/bin/claude",
+    "/usr/local/bin/claude",
+)
+
+
+def _native_linux_claude() -> str | None:
+    """Search common native Linux (WSL) claude install locations.
+
+    Excludes anything under /mnt/ - those are interop paths to the Windows
+    claude.exe (C13), which registers with the WINDOWS kernel. Returns the
+    first existing, executable candidate, else None."""
+    import shutil
+    raw_candidates = []
+    try:
+        npm = shutil.which("npm")
+        if npm:
+            raw_candidates.append(os.path.join(os.path.dirname(npm), "claude"))
+    except Exception:
+        pass
+    raw_candidates += list(_LINUX_CLAUDE_CANDIDATES)
+    for raw in raw_candidates:
+        if raw.startswith("/mnt/"):
+            continue  # interop Windows path - never a native WSL claude
+        expanded = os.path.expanduser(raw)
+        try:
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
+        except OSError:
+            continue
+    return None
 
 
 def _atomic_write(obj: dict):
@@ -79,8 +126,11 @@ def load_or_create() -> dict:
         # realms - seen when v2_wsl shipped carrying v2_win's identity).
         # Regenerate type + id. (T16)
         ident = {"type": detected, "id": str(uuid.uuid4())}
-    # Upgrade: ensure claude_bin is present on Linux (None on Windows).
-    if "claude_bin" not in ident:
+    # Upgrade: ensure claude_bin is present on Linux (None on Windows). A null
+    # claude_bin is re-detected too (T32): a headless-started kernel may have
+    # persisted null, and the filesystem fallback can now populate it.
+    if "claude_bin" not in ident or (
+            ident.get("claude_bin") is None and os.name != "nt"):
         ident["claude_bin"] = _detect_claude_bin()
         _atomic_write(ident)
     return ident
