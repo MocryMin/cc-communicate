@@ -892,7 +892,7 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   pytest / T2 parity; then live checklists L1 (spawn-race re-test) / L2
   (reconnect) / L3 (cross-realm cursors) / L4 (multi-collab stress) driven per
   the script's printed checklists; each live gate RED → bug T# + fix + re-run.
-- **Result**: T0 `PASS (40 .py + 2 .js parsed clean)` / T1 `PASS (56 passed)`
+- **Result**: T0 `PASS (40 .py + 2 .js parsed clean)` / T1 `PASS (72 passed, final re-run)`
   / T2 `PASS (PARITY OK 29 files)` → GATE PASS (scripted). Live gates:
   L1 `PASS` (one window; T30 fix verified live under the real double-fire) /
   L2 `PASS` (evoke→resume in cwd P, full round trip) / L3 `PASS` (per-store
