@@ -750,3 +750,26 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Confidence**: high for the mechanism (the fsync bottleneck is eliminated;
   domain dedup covers the relaxed durability). Live gate: clean
   `create_collaborator` with exactly one spawned window, no error window.
+
+### T29 — Task-1 brief defect: unit test ran the real full suite → infinite subprocess recursion
+
+- **Bug**: `tests/unit/test_run_regression.py::test_tree_without_server_py_is_red`
+  (transcribed from the Task-1 brief) did not monkeypatch `pytest_run`/`parity_run`.
+  `main()` evaluates all three tiers unconditionally, so `pytest_run()` spawned
+  `sys.executable -m pytest -q` (the FULL suite, per pytest.ini testpaths) — which
+  re-collects `test_run_regression.py` itself, so `test_tree_without_server_py_is_red`
+  ran again inside the child and spawned yet another full suite. Unbounded
+  recursion: 46 nested `python -m pytest -q` processes observed before the chain
+  was killed. Contradicts the file's own docstring ("No subprocess here") and the
+  brief's expected outcome (6 PASS).
+- **Fix**: added two monkeypatch lines to that test —
+  `pytest_run` and `parity_run` stubbed to `(PASS, "ok")`; the REAL `syntax_check`
+  is kept (the vacuous-pass guard is a T0 concern, and with tmp trees it spawns
+  no subprocesses). The brief's code block was amended + erratum noted.
+- **Files**: `tests/unit/test_run_regression.py` (Task 1), `task-1-brief.md`.
+- **Method**: unit run hung >120s; process tree showed the nesting chain; killed
+  all 46; verified `git status` clean (trees untouched, parity intact); applied
+  2-line fix; `6 passed in 0.03s` (zero subprocesses); full suite 56 passed +
+  PARITY OK unchanged.
+- **Confidence**: high — recursion mechanism proven by the process tree; green
+  after fix; full suite + parity re-verified (56 passed, PARITY OK (29 files)).
