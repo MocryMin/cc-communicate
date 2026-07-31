@@ -789,5 +789,11 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Method**: live repro (window count + pid evidence + session_ctrl events) →
   TDD (5 new tests in tests/unit/test_check_alive_fallback.py) → full suite +
   parity → L1 re-run.
+- **Re-run (L1 PASS)**: fresh kernel (fixed code, pid 34276), one
+  create_collaborator → **exactly ONE spawned window** (20148), no error
+  window, no resume spawn. The hook double-fired AGAIN (two start events 23ms
+  apart: pid 20148 real / pid 34948 transient — 34948 confirmed dead), and
+  check_alive fell back to 20148 → connect succeeded, check_alive(sid)=1.
+  The fallback works exactly as designed under the real failure pattern.
 - **Confidence**: high — mechanism fully evidenced from live artifacts; unit
-  tests lock the fallback/promote/prune semantics.
+  tests lock the fallback/promote/prune semantics; re-run passed live.
