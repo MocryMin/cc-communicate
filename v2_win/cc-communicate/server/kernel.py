@@ -421,7 +421,7 @@ def _dispatch(function: str, args: dict):
         return kernel_api.upload_cursor(cursors, _local_store_id, args["sid"],
                                         args.get("seq", 0))
     if function == "session_by_pid":
-        return kernel_api.session_by_pid(sessions, args["pid"])
+        return kernel_api.session_by_pid(sessions, alive_sessions, args["pid"])
     if function == "find_new_session":
         return kernel_api.find_new_session(sessions, args["cwd"], args.get("since_ts", 0))
     if function == "spawn_cc_new":

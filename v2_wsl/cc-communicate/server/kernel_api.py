@@ -430,9 +430,30 @@ def kernel_terminate() -> str:
 
 # ---------- session discovery ----------
 
-def session_by_pid(sessions: dict, pid: int):
+def _pid_live(pid, recorded):
+    """None=unknown/unset, False=dead, True=alive. Same liveness rule as
+    check_alive's _match: the pid must exist AND its start time must match the
+    recorded one within 1s (rejects pid reuse)."""
+    if pid is None or recorded is None:
+        return None
+    current = proc_start_time(pid)
+    if current is None:
+        return False
+    return abs(current - float(recorded)) <= 1.0
+
+
+def session_by_pid(sessions: dict, alive_sessions: dict, pid: int):
+    """Primary lookup walks sessions (last-write pid). T35: a boot can fire
+    SessionStart twice (T30) and the LAST write clobbers sessions[sid]['pid']
+    with a transient, already-dead pid - so on a primary miss, fall back
+    across every sid's known_pids (liveness-checked, same rule as
+    check_alive)."""
     for sid, info in sessions.items():
         if info and info.get("pid") == pid:
+            return sid
+    for sid, info in (alive_sessions or {}).items():
+        known = info.get("known_pids") or {}
+        if pid in known and _pid_live(pid, known[pid]) is True:
             return sid
     return None
 

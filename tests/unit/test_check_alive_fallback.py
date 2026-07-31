@@ -76,3 +76,60 @@ def test_known_pids_bounded(server, monkeypatch):
         ev = dict(ev, pid=i + 100, event_ts=i)
         k._handle_start(ev, "sess-t30")
     assert len(server.kernel.alive_sessions["sess-t30"]["known_pids"]) <= 8
+
+
+# ---------- T35: session_by_pid known_pids fallback (the my_session_id hole) ----------
+
+
+def test_session_by_pid_falls_back_to_known_pids(server, monkeypatch):
+    """Primary sessions[sid].pid is the dead last-write; the REAL pid resolves
+    via the known_pids fallback (T35 - the my_session_id hole)."""
+    ka = server.kernel_api
+    fake = {111: 1000.0, 222: None}  # 111 alive, 222 dead
+    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    _alive_entry(server, monkeypatch, 111, 1000.0)
+    _alive_entry(server, monkeypatch, 222, 2000.0)  # last write = dead 222 (primary)
+    assert ka.session_by_pid(server.kernel.sessions,
+                             server.kernel.alive_sessions, 111) == "sess-t30"
+    assert ka.session_by_pid(server.kernel.sessions,
+                             server.kernel.alive_sessions, 222) == "sess-t30"  # primary raw match (unchanged hot path)
+
+
+def test_session_by_pid_unknown_pid_none(server, monkeypatch):
+    ka = server.kernel_api
+    monkeypatch.setattr(ka, "proc_start_time", lambda pid: None)
+    _alive_entry(server, monkeypatch, 111, 1000.0)
+    assert ka.session_by_pid(server.kernel.sessions,
+                             server.kernel.alive_sessions, 999999) is None
+
+
+def test_session_by_pid_primary_unchanged(server, monkeypatch):
+    """No known_pids (pre-T30 style entry) -> primary scan only, same as before."""
+    ka = server.kernel_api
+    monkeypatch.setattr(ka, "proc_start_time", lambda pid: 1000.0)
+    k = server.kernel
+    ev = {"event": "start", "event_ts": 1000000, "session_id": "sess-t30",
+          "pid": 111, "cwd": "/tmp/x", "start_time": "unused",
+          "source": "startup"}
+    monkeypatch.setattr(k, "parse_start_time", lambda _s: 1000.0)
+    k._handle_start(ev, "sess-t30")
+    k.alive_sessions["sess-t30"].pop("known_pids", None)  # simulate pre-T30 entry
+    assert ka.session_by_pid(k.sessions, k.alive_sessions, 111) == "sess-t30"
+    assert ka.session_by_pid(k.sessions, k.alive_sessions, 999) is None
+
+
+def test_session_by_pid_never_resolves_other_sid(server, monkeypatch):
+    """A known pid of sid A never resolves to sid B (the T35 invariant)."""
+    ka = server.kernel_api
+    fake = {111: 1000.0, 333: 3000.0}
+    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    k = server.kernel
+    monkeypatch.setattr(k, "parse_start_time", lambda _s: 0.0)
+    ev_a = {"event": "start", "event_ts": 1, "session_id": "sess-a",
+            "pid": 111, "cwd": "/tmp/x", "start_time": "unused", "source": "startup"}
+    ev_b = {"event": "start", "event_ts": 2, "session_id": "sess-b",
+            "pid": 333, "cwd": "/tmp/x", "start_time": "unused", "source": "startup"}
+    k._handle_start(ev_a, "sess-a")
+    k._handle_start(ev_b, "sess-b")
+    assert ka.session_by_pid(k.sessions, k.alive_sessions, 111) == "sess-a"
+    assert ka.session_by_pid(k.sessions, k.alive_sessions, 333) == "sess-b"

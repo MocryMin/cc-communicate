@@ -564,24 +564,34 @@ expected result). Also see `log/implementation-log.md` for raw output.
   overwrites the first -> first message lost before any scan. Low probability
   (the kernel processes sends sequentially; each takes ~1ms+; same-pair sends
   are usually seconds apart). Fix when adopted: `O_EXCL` create + `__N` suffix
-  retry (no counter needed). Decision: not fixed (keep filename format).
+  retry (no counter needed). **Resolved by HP-01**: filenames carry per-store
+  sequence + message_id, so same-ms sends can never collide (covered by
+  tests/unit/test_message_record.py::test_burst_same_ms_no_overwrite).
 - **PB-2 (A2) - clock-backward archive-without-return**: the watermark is a
   wall-clock ms (`time.time()*1000`). If the clock steps backward (NTP, manual),
   a message written *later* can get an *earlier* ts; `archive(<=watermark)`
   then eats it without it ever being returned. Atomic scan does NOT fix this
   (it's a timestamp, not a monotonic seq). Windows NTP usually slews (no
   backward step) - rare. Fix when adopted: a persisted monotonic counter
-  (seq#) as the watermark unit. Decision: not fixed (user chose timestamps).
+  (seq#) as the watermark unit. **Resolved by HP-01**: ordering is by per-store
+  sequence, never created_at_ms (covered by
+  tests/unit/test_message_record.py::test_clock_backward_still_sequence_ordered).
 - **PB-3 - cross-realm clock skew**: a WSL caller's `listen` merges the local
   (wsl clock) and host (host clock) watermarks. If the clocks differ, a later
   wsl message can have a ts below the merged watermark and be archived-without-
   return on the wsl side. Same-machine (host, the current test scenario) is
   unaffected (one clock). Fix when adopted: per-machine watermarks or a global
-  seq#. Decision: not fixed (cross-realm is secondary).
+  seq#. **Resolved by HP-02**: per-store cursors replace merged watermarks —
+  no cross-store sequence comparison, no cross-clock judgement (covered by
+  tests/unit/test_cursor_ack.py; live gate L3, T33).
 
 ---
 
 ## §2 To-be-tested (need user / WSL deployment)
+
+> **Status (2026-07-31): all B1–B7 resolved** — each item carries its
+> CONFIRMED/DONE update below. Section kept as historical reference; new
+> live-gate results are recorded in §1 as T# entries.
 
 These need real CC spawning and/or a deployed WSL side. I can't fully run them
 without risking stray CC processes, trust prompts, or needing two live CCs.
@@ -834,3 +844,79 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   L3 re-run.
 - **Confidence**: high — mechanism evidenced from the live tmux cmdline +
   WSL PATH + identity file; unit tests lock search/reject/upgrade semantics.
+
+### T33 — Wave 1 live gates L2 (reconnect) + L3 (cross-realm cursors) PASS
+
+- **L2 (reconnect, T25)**: real CC-A (daf6acf9) closed (check_alive 0) →
+  evoke → `claude --resume` resumed with **cwd == P** (resume start event
+  cwd field verified) → check_alive 1 → send_message delivered (child
+  confirmed by message_id) → child's reply received via listen_v2 (per-store
+  cursor). No "No conversation found". Full round trip on the new kernel.
+- **L3 (cross-realm cursors, R2)**: fresh handshake (WSL id 4cefe529,
+  stale 3b870f0d retired), host→WSL spawn via the T31/T32-fixed path →
+  WSL CC 5372d1f1 spawned with the NATIVE WSL claude
+  (~/.npm-global/bin/claude, not interop) + connected. A sent 3 → B
+  listen_v2 saw seq 21/22/23 (host store, monotonic) → B partial-ACKed
+  cursor=22 → 21/22 archived, 23 re-delivered → B sent 2 back (plus its own
+  autonomous ack) → A listen_v2 saw seq 24/25/26 → A re-listened with the
+  same cursor → **empty** (no re-delivery). Per-store cursor independence +
+  zero loss + no cross-clock interference, live.
+- **Findings fixed en route**: T31 (peer cwd validation deferral), T32
+  (headless WSL kernel claude_bin → native Linux claude search).
+- **Confidence**: high — both gates driven live with real CCs on both
+  realms; cursor archive semantics verified at each step.
+
+### T34 — Wave 1 live gate L4 (multi-collab stress) PASS
+
+- **Scenario**: coordinator + 4 collaborators, 5 rounds, 1 tagged message per
+  collaborator per round (20 total, tags L4-r1-c1..L4-r5-c4), replies collected
+  via listen_v2 with per-store cursors. Spawned on the batch-journal-save
+  kernel (T27 fix + T30 fix).
+- **Result**: 20/20 messages delivered; **20/20 tag confirmations received**
+  (one per sent message); store-level verification: 20 sent records with 20
+  unique message_ids, 20 tag replies with 20 unique tags — **zero loss, zero
+  duplicates**. Re-listen with the final cursor returned empty (cursor
+  archiving correct under load). Clean close_connection on all 4.
+- **One-off observation**: the 4th spawn's plugin MCP server failed to boot
+  once (child alive but unresponsive to hellos; no mcp_server child process);
+  a replacement spawn connected first try — a child-boot flake, not
+  systematic. Recorded for awareness, not a bug.
+- **Confidence**: high — every sent message individually confirmed by tag;
+  store inspected directly for dupes/loss.
+
+### T28 — Wave 1 exit regression gate (scripted tiers + live L1–L4) — GATE PASS
+
+- **Method**: `py -3 tools/run_regression.py --tier auto` → T0 syntax / T1
+  pytest / T2 parity; then live checklists L1 (spawn-race re-test) / L2
+  (reconnect) / L3 (cross-realm cursors) / L4 (multi-collab stress) driven per
+  the script's printed checklists; each live gate RED → bug T# + fix + re-run.
+- **Result**: T0 `PASS (40 .py + 2 .js parsed clean)` / T1 `PASS (56 passed)`
+  / T2 `PASS (PARITY OK 29 files)` → GATE PASS (scripted). Live gates:
+  L1 `PASS` (one window; T30 fix verified live under the real double-fire) /
+  L2 `PASS` (evoke→resume in cwd P, full round trip) / L3 `PASS` (per-store
+  cursors, partial ACK, no re-delivery; T31+T32 fixes) / L4 `PASS` (20/20
+  sent, 20/20 confirmed, zero loss/dupes). Per-gate evidence in T30/T33/T34.
+- **Confidence**: high — scripted tiers machine-checked; live gates driven
+  with real CCs per checklist; three real bugs found + fixed en route
+  (T30/T31/T32), each with unit tests + parity.
+
+### T35 — L4 live gate finding: session_by_pid stale-pid hole breaks my_session_id (FIXED)
+
+- **Bug**: the 4th L4 collaborator's `my_session_id` failed. Its SessionStart
+  double-fired 7ms apart (T30 pattern): first pid 34392 (real), then pid 43212
+  (transient, dead). T30's known_pids fallback fixed `check_alive` but NOT
+  `session_by_pid` — it scans only `sessions[sid]["pid"]` (last write = the
+  dead transient), so the real pid never resolved to the sid and the
+  collaborator could not identify itself (its first protocol step). The
+  collaborator itself diagnosed this, wrote the fix, and verified it against
+  the real event files (its transcript is the diagnosis record).
+- **Fix**: `session_by_pid(sessions, alive_sessions, pid)` — primary scan
+  unchanged; on miss, fall back across every sid's `known_pids` with the same
+  liveness rule as `check_alive` (new `_pid_live` helper). Covers both realms.
+- **Method**: live repro (L4 gate: spawned collaborator's my_session_id
+  failure; real event files show pids 34392/43212) → TDD (4 tests appended to
+  tests/unit/test_check_alive_fallback.py) → full suite + parity →
+  commit.
+- **Confidence**: high — verified against the real double-fire events
+  (session_by_pid(34392) -> sid); unit tests lock fallback/primary/unknown
+  semantics.
