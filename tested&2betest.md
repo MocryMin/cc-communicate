@@ -877,10 +877,12 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   unique message_ids, 20 tag replies with 20 unique tags — **zero loss, zero
   duplicates**. Re-listen with the final cursor returned empty (cursor
   archiving correct under load). Clean close_connection on all 4.
-- **One-off observation**: the 4th spawn's plugin MCP server failed to boot
-  once (child alive but unresponsive to hellos; no mcp_server child process);
-  a replacement spawn connected first try — a child-boot flake, not
-  systematic. Recorded for awareness, not a bug.
+- **One-off observation (CORRECTED, see T35)**: the 4th spawn appeared
+  unresponsive to hellos; initially recorded as a plugin-boot flake. The
+  child was actually functional — its `my_session_id` was failing due to the
+  `session_by_pid` stale-pid hole (T35), which sent it into diagnosis mode
+  instead of listening. The child diagnosed and fixed the bug itself (see
+  T35); the wedge was a real cc-communicate bug, not a child-boot flake.
 - **Confidence**: high — every sent message individually confirmed by tag;
   store inspected directly for dupes/loss.
 
@@ -897,8 +899,8 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   cursors, partial ACK, no re-delivery; T31+T32 fixes) / L4 `PASS` (20/20
   sent, 20/20 confirmed, zero loss/dupes). Per-gate evidence in T30/T33/T34.
 - **Confidence**: high — scripted tiers machine-checked; live gates driven
-  with real CCs per checklist; three real bugs found + fixed en route
-  (T30/T31/T32), each with unit tests + parity.
+  with real CCs per checklist; four real bugs found + fixed en route
+  (T30/T31/T32/T35), each with unit tests + parity.
 
 ### T35 — L4 live gate finding: session_by_pid stale-pid hole breaks my_session_id (FIXED)
 
