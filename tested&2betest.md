@@ -797,3 +797,17 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   The fallback works exactly as designed under the real failure pattern.
 - **Confidence**: high — mechanism fully evidenced from live artifacts; unit
   tests lock the fallback/promote/prune semantics; re-run passed live.
+
+### T31 — L3 live gate finding: cross-realm spawn blocked by host-side cwd validation (FIXED)
+
+- **Bug**: create_collaborator(machine=<wsl peer>, cwd=/home/...) from the host
+  returned INVALID_ARGUMENT - mcp_server entry validated the peer-perspective
+  cwd with host semantics (os.path.isabs on Windows rejects /home/...), so
+  every host->WSL spawn was blocked before the RPC left the host.
+- **Fix**: validation.validate_spawn_entry - caller_sid always validated; cwd
+  validated only for LOCAL spawns (machine is None); the peer kernel
+  re-validates peer cwds with its own filesystem semantics at dispatch.
+- **Method**: live repro (L3 gate: cross-machine create_collaborator) → TDD
+  (3 tests in tests/unit/test_validation.py) → full suite + parity → L3 re-run.
+- **Confidence**: high — live repro exact; entry rule now matches the
+  validation authority split (local entry, peer entry re-validates).

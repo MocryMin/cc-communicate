@@ -237,8 +237,7 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
     else this machine) and connect to it. The new CC loads the plugin and
     listens; this tool waits for it to register, then connects. Returns
     connect's result, or 'failed' if it doesn't register within 30s."""
-    err = _entry_error((validation.validate_session_id, caller_sid),
-                       (validation.validate_cwd, cwd))
+    err = validation.validate_spawn_entry(caller_sid, cwd, machine)
     if err:
         return err
     return user_functions.create_collaborator(caller_sid, cwd, hold_time, machine)

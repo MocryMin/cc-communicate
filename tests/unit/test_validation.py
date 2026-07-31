@@ -159,3 +159,30 @@ def test_dispatch_passes_valid_args(server):
               encoding="utf-8") as f:
         resp = json.load(f)
     assert resp == {"request_id": "r2", "result": "ok", "error": None}
+
+
+# ---------- spawn entry (create_collaborator) ----------
+
+def test_spawn_entry_peer_cwd_deferred(server):
+    """machine given -> peer-perspective cwd must NOT be validated on this
+    machine (the peer kernel validates it). T31."""
+    v = server.validation
+    assert v.validate_spawn_entry("alice", "/home/wsl/project",
+                                  {"id": "wsl-1", "type": "wsl-ubuntu"}) is None
+    assert v.validate_spawn_entry("alice", "//wsl.localhost/Ubuntu/home/x",
+                                  {"id": "wsl-1"}) is None
+
+
+def test_spawn_entry_local_cwd_still_validated(server):
+    """machine None -> the cwd is local and MUST be host-absolute + existing."""
+    v = server.validation
+    assert v.validate_spawn_entry("alice", "/home/wsl/project", None) is not None
+    assert v.validate_spawn_entry("alice", "relative/path", None) is not None
+    assert v.validate_spawn_entry("alice", str(server.paths.DATA_DIR), None) is None
+
+
+def test_spawn_entry_sid_always_validated(server):
+    """caller_sid is validated regardless of machine."""
+    v = server.validation
+    for bad in ("../evil", "a__b", ""):
+        assert v.validate_spawn_entry(bad, "C:\\whatever", {"id": "wsl-1"}) is not None

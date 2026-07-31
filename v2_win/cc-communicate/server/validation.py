@@ -117,3 +117,20 @@ def resolve_under(root: str, *parts: str) -> str:
         raise InvalidArgumentError(
             f"resolved path {target!r} escapes its allowed root {base!r}")
     return target
+
+
+def validate_spawn_entry(caller_sid: str, cwd: str, machine: dict):
+    """HP-06 entry validation for create_collaborator. caller_sid is ALWAYS
+    validated (it is a local id on every machine). cwd is validated ONLY for
+    local spawns (machine is None): a peer-perspective cwd (machine given) is
+    not absolute/existing on THIS machine, and the peer kernel re-validates it
+    with its own filesystem semantics at dispatch (kernel _ARG_VALIDATORS
+    spawn_cc_new) - defense in depth is preserved. Returns an INVALID_ARGUMENT
+    error string, or None when all checks pass."""
+    try:
+        validate_session_id(caller_sid)
+        if machine is None:
+            validate_cwd(cwd)
+    except InvalidArgumentError as e:
+        return str(e)
+    return None
