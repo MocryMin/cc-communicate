@@ -43,21 +43,47 @@ def query_session(sessions: dict, session_id: str):
 
 
 def check_alive(alive_sessions: dict, session_id: str) -> int:
+    """1 if any registration (primary or known_pids fallback) matches the live
+    process, else 0. T30: a boot can fire SessionStart twice (startup + restore)
+    resolving DIFFERENT claude pids - one transient (already dead), one real.
+    Last-write-wins leaves the dead pid primary, so fall back across every pid
+    ever recorded for this sid (known_pids, maintained by kernel._handle_start).
+    Dead candidates are pruned; a match promotes to primary so the hot path
+    stays cheap. start_time tie-break (abs diff <= 1s) rejects pid reuse."""
     info = alive_sessions.get(session_id)
     if not info:
         return 0
-    pid = info.get("pid")
-    recorded = info.get("start_time")
-    if pid is None or recorded is None:
+
+    def _match(pid, recorded):
+        """None=unknown/unset, False=dead, True=alive."""
+        if pid is None or recorded is None:
+            return None
+        current = proc_start_time(pid)
+        if current is None:
+            return False
+        return abs(current - float(recorded)) <= 1.0
+
+    known = info.get("known_pids")
+    if known:
+        # newest-first: the primary (last write) is checked first - the hot
+        # path stays O(1) when it is alive; a dead last-write is pruned BEFORE
+        # an older live pid can match and return (T30).
+        for pid, recorded in list(known.items())[::-1]:
+            m = _match(pid, recorded)
+            if m is True:
+                info["pid"], info["start_time"] = pid, recorded
+                return 1
+            if m is False:
+                known.pop(pid, None)  # dead - don't re-check next time
+    else:
+        m = _match(info.get("pid"), info.get("start_time"))
+        if m is True:
+            return 1
+        if m is False:
+            alive_sessions.pop(session_id, None)
         return 0
-    current = proc_start_time(pid)
-    if current is None:
-        alive_sessions.pop(session_id, None)
-        return 0
-    if abs(current - float(recorded)) > 1.0:
-        alive_sessions.pop(session_id, None)
-        return 0
-    return 1
+    alive_sessions.pop(session_id, None)
+    return 0
 
 
 # ---------- conversation registration ----------

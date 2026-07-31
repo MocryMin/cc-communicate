@@ -773,3 +773,21 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   PARITY OK unchanged.
 - **Confidence**: high — recursion mechanism proven by the process tree; green
   after fix; full suite + parity re-verified (56 passed, PARITY OK (29 files)).
+
+### T30 — L1 live gate RED: SessionStart double-fire stale pid → check_alive false-dead → double spawn (FIXED)
+
+- **Bug**: create_collaborator spawned TWO windows. The child's SessionStart hook
+  fired twice ~20ms apart; the two firings resolved DIFFERENT claude.exe pids
+  (17140 real / 33060 transient, already dead). Kernel _handle_start is
+  last-write-wins -> dead pid became primary -> check_alive returned 0 for a
+  LIVE session -> connect's revive path evoked a second `claude --resume` window.
+  (T27's batch-save fix was not the full story: this is a registration-quality
+  race, not an event-loop stall.)
+- **Fix**: check_alive falls back across `known_pids` (every (pid, start_time)
+  ever recorded for the sid, maintained by _handle_start, bounded to 8); a
+  match promotes to primary; dead candidates pruned. Covers both realms.
+- **Method**: live repro (window count + pid evidence + session_ctrl events) →
+  TDD (5 new tests in tests/unit/test_check_alive_fallback.py) → full suite +
+  parity → L1 re-run.
+- **Confidence**: high — mechanism fully evidenced from live artifacts; unit
+  tests lock the fallback/promote/prune semantics.

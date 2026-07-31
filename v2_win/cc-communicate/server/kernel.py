@@ -243,12 +243,23 @@ def _handle_start(ev: dict, sid: str):
         "first_seen": existing.get("first_seen", ev.get("event_ts")),
         "machine": _local_machine_type,  # v2: stamp local machine type (§3.2.1)
     }
+    # T30: keep every (pid, start) this session has ever registered - a boot can
+    # fire SessionStart twice (startup + restore) and the firings can resolve
+    # different claude pids (one transient, already dead). check_alive falls
+    # back across these instead of trusting the last event alone. Bounded to
+    # the 8 most recent; dead entries are pruned by check_alive on read.
+    known = alive_sessions.get(sid, {}).get("known_pids", {})
     alive_sessions[sid] = {
         "pid": ev.get("pid"),
         "start_time": parse_start_time(ev.get("start_time")),
         "cwd": ev.get("cwd"),
         "machine": _local_machine_type,
+        "known_pids": known,
     }
+    known[ev.get("pid")] = parse_start_time(ev.get("start_time"))
+    if len(known) > 8:
+        for old_pid in sorted(known, key=known.get)[:-8]:
+            known.pop(old_pid, None)
 
 
 def _handle_end(ev: dict, sid: str):
