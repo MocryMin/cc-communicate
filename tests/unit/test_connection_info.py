@@ -2,6 +2,8 @@
 import json
 import os
 
+from rpc_client import KernelError
+
 
 def _conn_id(n):
     return f"c{n:031d}"  # fits the [A-Za-z0-9-] charset, 32 chars
@@ -62,3 +64,39 @@ def test_info_path_validates(server):
     d = server.conversations.info_path("alice", "bob")
     assert d.endswith("info.json")
     assert os.path.dirname(d) == server.conversations.conv_dir("alice", "bob")
+
+
+def test_close_connection_deactivates(server, monkeypatch):
+    """close_connection marks the connection closed via deactivate_connection."""
+    import user_functions
+    ka = server.kernel_api
+    convs = {}
+    ka.activate_connection(convs, "alice", "bob", "conn-1")
+    ops = {}
+
+    def call(fn, args=None, timeout=30.0, operation_id=None):
+        args = args or {}
+        ops[fn] = args
+        if fn == "upload_ack_timestamp":
+            return 0
+        if fn == "query_cursors":
+            return {}
+        if fn == "send_message":
+            return {"sent": True, "message_id": "m", "ts": 1,
+                    "correlation_id": None}
+        if fn == "unregister_conversation":
+            return {"ok": True}
+        if fn == "deactivate_connection":
+            return ka.deactivate_connection(convs, args["sid_a"], args["sid_b"])
+        raise KernelError(f"unknown: {fn}")
+
+    monkeypatch.setattr(server.rpc_client, "call", call)
+    monkeypatch.setattr(server.rpc_client, "call_remote", lambda *a, **k: None)
+    monkeypatch.setattr(user_functions, "_conv_store", lambda toid: None)
+    r = user_functions.close_connection("alice", "bob", acked_ts=5)
+    assert r == {"ok": True, "code": None, "message": None,
+                 "data": {"closed": True}, "retryable": False}
+    assert ops["deactivate_connection"]["sid_a"] == "alice"
+    assert ops["deactivate_connection"]["sid_b"] == "bob"
+    info = ka.get_connection_info("alice", "bob")
+    assert info["status"] == "closed"

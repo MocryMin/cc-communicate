@@ -627,7 +627,13 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0,
                 {"sid_a": session_id, "sid_b": toid})
     except Exception:
         pass  # best-effort: never block the caller's exit on a notify/unregister failure
-    return {"closed": True}
+    # 2b. mark the connection closed (info.json status=closed; HP-05/D9) -
+    # routed like unregister (fire-and-forget if the conv is remote)
+    try:
+        _deactivate_connection(session_id, toid, conv_remote)
+    except Exception:
+        pass  # best-effort, like the notify above
+    return _ok({"closed": True})
 
 
 # ---------- cursor-ACK listening (HP-02; preferred over legacy listen) ----------
