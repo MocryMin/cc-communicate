@@ -66,12 +66,15 @@ def test_spawn_cc_new_writes_pending_and_token(server, monkeypatch):
 def test_handle_start_binds_token(server):
     """Plan A: a start event carrying spawn_token populates the kernel map."""
     k = server.kernel
+    ka = server.kernel_api
     k.spawn_tokens.clear()
     k.alive_sessions.clear()
+    _write_pending(server, "t1")
     ev = {"event": "start", "event_ts": 1, "session_id": "s1", "pid": 11,
           "cwd": "/tmp", "start_time": None, "spawn_token": "t1"}
     k._handle_start(ev, "s1")
     assert k.spawn_tokens.get("t1") == "s1"
+    assert ka.has_pending_spawn("t1") is False  # plan-A bind consumes the marker
     # end event releases the token
     k._handle_end(ev, "s1")
     assert k.spawn_tokens.get("t1") is None

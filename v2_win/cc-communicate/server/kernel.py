@@ -33,7 +33,7 @@ from paths import (
     CONVERSATIONS_DIR, CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
     ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE,
-    OPERATION_JOURNAL_FILE, ensure_runtime_dirs,
+    OPERATION_JOURNAL_FILE, PENDING_SPAWN_DIR, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
@@ -267,6 +267,10 @@ def _handle_start(ev: dict, sid: str):
     tok = ev.get("spawn_token")
     if tok:
         spawn_tokens[tok] = sid
+        try:
+            os.remove(os.path.join(PENDING_SPAWN_DIR, tok + ".json"))
+        except OSError:
+            pass
 
 
 def _handle_end(ev: dict, sid: str):
