@@ -253,7 +253,8 @@ listener - only use the listen/listen_v2 tool.
   current state with `reused: True`); ONE active connection per pair - a
   DIFFERENT id while one is active is `err(CONFLICT, data:
   {current_connection_id, status})`. Other errors: `NOT_FOUND` (target
-  unknown), `NOT_ALIVE` (evoke failed / target never revived - retryable),
+  unknown), `NOT_ALIVE` (evoke failed / target never revived - retryable only
+  for the never-revived variant),
   `TIMEOUT` (no reply - retryable), `PEER_UNREACHABLE` / `INTERNAL`. Once
   connect succeeds the channel is ESTABLISHED: you MUST then call listen in
   a loop and keep it active until you call `close_connection`.
