@@ -32,6 +32,26 @@ import spawn
 import machine_identity
 import uuid
 from paths import CONVERSATIONS_DIR, PLUGIN_ROOT, MACHINE_INFO_LOG_DIR
+from result import Code
+from rpc_client import KernelError
+
+
+def _ok(data=None):
+    return {"ok": True, "code": None, "message": None, "data": data, "retryable": False}
+
+
+def _err(code, message, data=None, retryable=False):
+    return {"ok": False, "code": code, "message": message, "data": data, "retryable": retryable}
+
+
+def _kernel_err(e: KernelError):
+    """Local kernel failure -> INTERNAL (entry validation already ran; a kernel
+    error here is a bug or a crashed kernel)."""
+    return _err(Code.INTERNAL, str(e))
+
+
+def _remote_err():
+    return _err(Code.PEER_UNREACHABLE, "peer machine unreachable")
 
 _REVIVE_WAIT = 30.0
 # Floor for create_collaborator hold_time. A freshly-spawned CC can take
@@ -110,13 +130,17 @@ def _register(caller, target, conv_remote):
         rpc_client.call_remote(conv_remote, "register_conversation", {"sid_a": caller, "sid_b": target})
 
 
-def _send(fromid, toid, message, conv_remote) -> str:
+def _send(fromid, toid, message, conv_remote, correlation_id=None, kind=None):
     # HP-01/HP-03: one message_id per LOGICAL send, generated here so every
     # funnel (send_message / connect hello / close notice) gets dedup for
     # free. The rpc layer reuses it as the operation_id, so a transport retry
     # replays the journaled result and a domain retry dedups on the filename.
     mid = uuid.uuid4().hex
     args = {"fromid": fromid, "toid": toid, "message": message, "message_id": mid}
+    if correlation_id is not None:
+        args["correlation_id"] = correlation_id
+    if kind is not None:
+        args["kind"] = kind
     if conv_remote is None:
         return rpc_client.call("send_message", args, operation_id=mid)
     return rpc_client.call_remote(conv_remote, "send_message", args, operation_id=mid)
@@ -240,66 +264,140 @@ def _poll_reply(caller, target, hold_time, conv_remote, hello_ts=0):
 
 # ---------- tools ----------
 
-def my_session_id() -> str:
+def my_session_id() -> dict:
     """Discover this CC's own session_id. Walks the process tree to the claude
     binary ancestor (resolve_claude, Amd1), then looks up the session by pid.
-    Returns the sid or 'failed, ...'."""
+    Returns ok(sid) or err(...)."""
     from proc import resolve_claude
     pid, _ = resolve_claude(os.getpid())
     if pid is None:
-        return "failed, could not find claude ancestor"
-    sid = rpc_client.call("session_by_pid", {"pid": pid})
-    return sid if sid else "failed, no session recorded for claude pid " + str(pid)
+        return _err(Code.INTERNAL, "could not find claude ancestor")
+    try:
+        sid = rpc_client.call("session_by_pid", {"pid": pid})
+    except KernelError as e:
+        return _kernel_err(e)
+    if not sid:
+        return _err(Code.NOT_FOUND, f"no session recorded for claude pid {pid}")
+    return _ok(sid)
 
 
-def query_session(session_id: str):
-    """Local first, then each registered peer machine (cross-realm fan-out)."""
-    r = rpc_client.call("query_session", {"session_id": session_id})
-    if r:
-        return r
+def query_session(session_id: str) -> dict:
+    """Local first, then each registered peer machine (cross-realm fan-out).
+    ok(session_inf) or ok(None) when unknown everywhere."""
+    try:
+        r = rpc_client.call("query_session", {"session_id": session_id})
+        if r:
+            return _ok(r)
+    except KernelError:
+        pass
     for m in read_machine_info_log():
         r = rpc_client.call_remote(m, "query_session", {"session_id": session_id})
         if r:
-            return r
-    return None
+            return _ok(r)
+    return _ok(None)
 
 
-def check_alive(session_id: str) -> int:
-    if rpc_client.call("check_alive", {"session_id": session_id}) == 1:
-        return 1
+def check_alive(session_id: str) -> dict:
+    """1 if the session is truly alive on this machine or any registered peer;
+    0 otherwise; err(INTERNAL) if the local kernel itself errors out."""
+    try:
+        if rpc_client.call("check_alive", {"session_id": session_id}) == 1:
+            return _ok(1)
+    except KernelError as e:
+        return _kernel_err(e)
     for m in read_machine_info_log():
         if rpc_client.call_remote(m, "check_alive", {"session_id": session_id}) == 1:
-            return 1
-    return 0
+            return _ok(1)
+    return _ok(0)
 
 
 def query_conversations(session_id: str) -> dict:
     """v2 dict format: {partner_sid: {...info}, ...}. Merges local + peers."""
     out = {}
-    local = rpc_client.call("query_conversations", {"session_id": session_id})
+    try:
+        local = rpc_client.call("query_conversations", {"session_id": session_id})
+    except KernelError:
+        local = None
     if isinstance(local, dict):
         out.update(local)
     for m in read_machine_info_log():
         r = rpc_client.call_remote(m, "query_conversations", {"session_id": session_id})
         if isinstance(r, dict):
             out.update(r)  # sid uniqueness -> drop dups
-    return out
+    return _ok(out)
 
 
-def send_message(fromid: str, toid: str, message: str) -> str:
-    """Route by the conversation store (host for cross-machine, else local)."""
+def send_message(fromid: str, toid: str, message: str,
+                 correlation_id: str = None, kind: str = None) -> dict:
+    """Route by the conversation store (host for cross-machine, else local).
+    ok({message_id, ts}) on success; err(NOT_FOUND) when the conversation is
+    not registered; err(INTERNAL/PEER_UNREACHABLE) on transport failure."""
     conv_remote = _conv_store(toid)
-    return _send(fromid, toid, message, conv_remote)
+    try:
+        r = _send(fromid, toid, message, conv_remote,
+                  correlation_id=correlation_id, kind=kind)
+    except KernelError as e:
+        return _kernel_err(e)
+    if r is None:
+        return _remote_err()
+    if r.get("sent"):
+        return _ok({"message_id": r.get("message_id"), "ts": r.get("ts")})
+    return _err(Code.NOT_FOUND, r.get("reason", "send failed"))
 
 
-def evoke(session_id: str) -> str:
+def evoke(session_id: str) -> dict:
     """Revive a dead CC on whatever machine it lives on (local or remote)."""
     is_local, machine = _find_target_machine(session_id)
     if not is_local and machine is None:
-        return "failed, session not exists"
-    if is_local:
-        return rpc_client.call("evoke", {"session_id": session_id})
-    return rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
+        return _err(Code.NOT_FOUND, "session not exists")
+    try:
+        if is_local:
+            r = rpc_client.call("evoke", {"session_id": session_id})
+        else:
+            r = rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
+    except KernelError as e:
+        return _kernel_err(e)
+    if r is None:
+        return _remote_err()
+    if r.get("evoked"):
+        return _ok({"evoked": True, "session_id": r.get("session_id")})
+    return _err(Code.NOT_FOUND, r.get("reason", "evoke failed"))
+
+
+def register_conversation(sid_a: str, sid_b: str) -> dict:
+    """Mark a LOCAL conversation active (low-level; connect handles routing).
+    Exposed for bootstrapping/testing."""
+    try:
+        r = rpc_client.call("register_conversation", {"sid_a": sid_a, "sid_b": sid_b})
+    except KernelError as e:
+        return _kernel_err(e)
+    return _ok(r if isinstance(r, dict) else {"ok": True})
+
+
+def unregister_conversation(sid_a: str, sid_b: str) -> dict:
+    """Mark a LOCAL conversation inactive (low-level)."""
+    try:
+        r = rpc_client.call("unregister_conversation", {"sid_a": sid_a, "sid_b": sid_b})
+    except KernelError as e:
+        return _kernel_err(e)
+    return _ok(r if isinstance(r, dict) else {"ok": True})
+
+
+def withdraw(fromid: str, toid: str, init_connect: int = 0,
+             message_id: str = None) -> dict:
+    """Withdraw a message or whole LOCAL conversation (low-level).
+    init_connect=1: remove the whole folder + unregister; =0: default legacy
+    mode withdraws fromid's latest undelivered message (non-idempotent).
+    message_id: withdraw that EXACT message (retry-safe; preferred)."""
+    try:
+        r = rpc_client.call("withdraw", {"fromid": fromid, "toid": toid,
+                                         "init_connect": init_connect,
+                                         "message_id": message_id})
+    except KernelError as e:
+        return _kernel_err(e)
+    if r and r.get("withdrawn"):
+        return _ok(r)
+    return _err(Code.NOT_FOUND, (r or {}).get("reason", "withdraw failed"))
 
 
 def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
@@ -339,9 +437,9 @@ def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
                     watermark = wm
         if messages:
             messages.sort(key=lambda x: x.get("time", 0))
-            return {"messages": messages, "watermark": watermark}
+            return _ok({"messages": messages, "watermark": watermark})
         time.sleep(_LISTEN_POLL)
-    return {"messages": [], "watermark": acked_ts}
+    return _ok({"messages": [], "watermark": acked_ts})
 
 
 def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
@@ -514,9 +612,9 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
             messages.sort(key=lambda m: (m.get("created_at_ms", 0),
                                          m.get("store_id") or "",
                                          m.get("sequence", 0)))
-            return {"messages": messages, "next_cursors": next_cursors}
+            return _ok({"messages": messages, "next_cursors": next_cursors})
         time.sleep(_LISTEN_POLL)
-    return {"messages": [], "next_cursors": cursors}
+    return _ok({"messages": [], "next_cursors": cursors})
 
 
 def query_my_cursors(session_id: str) -> dict:
@@ -534,10 +632,10 @@ def query_my_cursors(session_id: str) -> dict:
         rr = rpc_client.call_remote(host, "query_cursors", {"sid": session_id})
         if isinstance(rr, dict):
             out.update(rr)
-    return out
+    return _ok(out)
 
 
-def query_my_ACK_timestamp(session_id: str) -> int:
+def query_my_ACK_timestamp(session_id: str) -> dict:
     """Recover the kernel's stored ACK watermark for session_id (T24). Call this
     after a compact / long gap / kernel restart if you've lost your latest ts,
     then use the returned value as `acked_ts` on your next listen."""
@@ -545,7 +643,7 @@ def query_my_ACK_timestamp(session_id: str) -> int:
         r = rpc_client.call("query_ack_timestamp", {"sid": session_id})
     except Exception:
         r = 0
-    return r if isinstance(r, int) else 0
+    return _ok(r if isinstance(r, int) else 0)
 
 
 def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
@@ -594,10 +692,10 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
 
 def query_machines() -> dict:
     """Registered peer machines: {id: entry, ...}."""
-    return {m.get("id"): m for m in read_machine_info_log()}
+    return _ok({m.get("id"): m for m in read_machine_info_log()})
 
 
-def help_connect_machines() -> str:
+def help_connect_machines() -> dict:
     """Return the cross-machine handshake playbook (C4). The CC calls this when
     the user wants to link this machine to a peer (e.g. 'help me connect
     machines', 'connect WSL to host', 'register the other machine'), then follows
@@ -606,6 +704,6 @@ def help_connect_machines() -> str:
     guide_path = os.path.join(PLUGIN_ROOT, "server", "handshake_guide.md")
     try:
         with open(guide_path, encoding="utf-8") as f:
-            return f.read()
+            return _ok(f.read())
     except OSError as e:
-        return "handshake guide not found at %s: %s" % (guide_path, e)
+        return _err(Code.NOT_FOUND, f"handshake guide not found at {guide_path}: {e}")

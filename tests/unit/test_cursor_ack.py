@@ -151,8 +151,9 @@ def test_listen_v2_merges_stores_without_mixing_cursors(server, monkeypatch):
     monkeypatch.setattr(uf.machine_identity, "load_or_create",
                         lambda: {"id": LOCAL, "type": "wsl-test"})
     r = uf.listen_v2("bob", {LOCAL: 5}, timeout=1)
-    assert [m["payload"]["text"] for m in r["messages"]] == ["local-msg"]
-    assert r["next_cursors"] == {LOCAL: 6}  # HOST 未被推进（无消息、无记录）
+    assert r["ok"] is True
+    assert [m["payload"]["text"] for m in r["data"]["messages"]] == ["local-msg"]
+    assert r["data"]["next_cursors"] == {LOCAL: 6}  # HOST 未被推进（无消息、无记录）
     assert calls["local"][0] == "listen_scan_v2" and calls["host"][0] == "listen_scan_v2"
 
 
@@ -166,7 +167,8 @@ def test_query_my_cursors_merges(server, monkeypatch):
     monkeypatch.setattr(uf, "_host_entry", lambda: {"id": HOST, "type": "win-host"})
     monkeypatch.setattr(uf.machine_identity, "load_or_create",
                         lambda: {"id": LOCAL, "type": "wsl-test"})
-    assert uf.query_my_cursors("bob") == {LOCAL: 6, HOST: 3}
+    r = uf.query_my_cursors("bob")
+    assert r["ok"] is True and r["data"] == {LOCAL: 6, HOST: 3}
 
 
 def test_close_connection_uploads_cursors_per_store(server, monkeypatch):
