@@ -165,6 +165,31 @@ def _unregister(sid, toid, conv_remote):
     return rpc_client.call_remote(conv_remote, "unregister_conversation", {"sid_a": sid, "sid_b": toid})
 
 
+def _get_connection_info(sid_a, sid_b, conv_remote):
+    if conv_remote is None:
+        return rpc_client.call("get_connection_info", {"sid_a": sid_a, "sid_b": sid_b})
+    return rpc_client.call_remote(conv_remote, "get_connection_info",
+                                  {"sid_a": sid_a, "sid_b": sid_b})
+
+
+def _activate_connection(sid_a, sid_b, connection_id, conv_remote):
+    if conv_remote is None:
+        return rpc_client.call("activate_connection",
+                               {"sid_a": sid_a, "sid_b": sid_b,
+                                "connection_id": connection_id})
+    return rpc_client.call_remote(conv_remote, "activate_connection",
+                                  {"sid_a": sid_a, "sid_b": sid_b,
+                                   "connection_id": connection_id})
+
+
+def _deactivate_connection(sid_a, sid_b, conv_remote):
+    if conv_remote is None:
+        return rpc_client.call("deactivate_connection",
+                               {"sid_a": sid_a, "sid_b": sid_b})
+    return rpc_client.submit_remote_noblock(conv_remote, "deactivate_connection",
+                                            {"sid_a": sid_a, "sid_b": sid_b})
+
+
 def _conv_exists(caller, target, conv_remote) -> bool:
     name = os.path.basename(conversations.conv_dir(caller, target))
     if conv_remote is None:
@@ -214,11 +239,14 @@ def _archive_reply(conv_remote, caller, fname, path):
         rpc_client.call_remote(conv_remote, "collect_messages", {"session_id": caller})
 
 
-def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
+def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0, connection_id=None):
     """Scan pipe_dir once for target's reply (toid==caller, fromid==target).
-    Returns the reply content (archiving the file), or None. Stale messages
-    (ts <= hello_ts) are skipped (C3). Dual reader (HP-01): for records the
-    envelope supplies ts/content."""
+    HP-05: a record whose correlation_id == connection_id is the reply -
+    foreign messages can never be misread. Legacy fallback (D9, one release):
+    when no correlation_id matches and EXACTLY ONE candidate exists (from/to +
+    newer than hello_ts), accept it - that is unambiguous. Returns the reply
+    content (archiving the file), or None."""
+    candidates = []
     for fname, path, info in _scan_pipe(pipe_dir, caller):
         if info["from_id"] != target:
             continue
@@ -230,8 +258,10 @@ def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
             content = (rec.get("payload") or {}).get("text")
             if content is None:
                 continue
+            corr = rec.get("correlation_id")
         else:
             ts = info["ts"]
+            corr = None
             try:
                 with open(path, encoding="utf-8") as f:
                     content = f.read()
@@ -239,27 +269,33 @@ def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
                 continue  # C5: skip malformed/undecodable files
         if ts <= hello_ts:
             continue  # C3: stale (not newer than the hello) - skip
+        if connection_id is not None and corr == connection_id:
+            _archive_reply(conv_remote, caller, fname, path)
+            return content
+        candidates.append((fname, path, content))
+    if connection_id is not None and len(candidates) == 1:
+        fname, path, content = candidates[0]
         _archive_reply(conv_remote, caller, fname, path)
         return content
     return None
 
 
-def _poll_reply(caller, target, hold_time, conv_remote, hello_ts=0):
+def _poll_reply(caller, target, hold_time, conv_remote, hello_ts=0, connection_id=None):
     """Block up to hold_time scanning (in-process) for target's reply (a pipe
     file with toid==caller, fromid==target). Returns the reply content, or None
     on timeout. Reads content BEFORE archiving (Amd2: no false-timeout even if a
     stray listener races us). A final scan after the deadline catches a reply
     that landed in the last poll window. (T15) hello_ts filters stale messages
-    (C3)."""
+    (C3); connection_id selects the correlated reply (HP-05)."""
     pipe_dir = _pipe_dir_for(caller, target, conv_remote)
     deadline = time.time() + hold_time
     while time.time() < deadline:
-        reply = _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts)
+        reply = _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts, connection_id)
         if reply is not None:
             return reply
         time.sleep(0.5)
     # final scan: a reply may have landed in the last 0.5s poll window. (T15)
-    return _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts)
+    return _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts, connection_id)
 
 
 # ---------- tools ----------
@@ -442,72 +478,103 @@ def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
     return _ok({"messages": [], "watermark": acked_ts})
 
 
-def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
+def connect(caller_sid: str, target_sid: str, connection_id: str = None,
+            hold_time: int = 300) -> dict:
     """Establish a p2p connection to target_sid (Amd2 in-process poll + Phase 2
-    routing). Flow: find target's machine -> check_alive (revive if dead) ->
-    register + send hello on the conv store -> poll in-process for the reply ->
-    succeed / withdraw on fail. Blocks up to hold_time."""
+    routing). HP-05: connection_id (caller-supplied or generated) correlates
+    the reply via the hello's correlation_id; info.json enforces ONE active
+    connection per pair (D9) - a retry with the same id returns the current
+    state, a different id is CONFLICT. Blocks up to hold_time."""
+    hold_time = max(hold_time, _MIN_HOLD_TIME)
+    conn_id = connection_id or uuid.uuid4().hex
     # 1. locate target
     is_local, target_machine = _find_target_machine(target_sid)
     if not is_local and target_machine is None:
-        return "failed, target session not exists"
-
+        return _err(Code.NOT_FOUND, "target session not exists")
     # 2. check_alive on target's machine
-    if is_local:
-        alive = rpc_client.call("check_alive", {"session_id": target_sid})
-    else:
-        alive = rpc_client.call_remote(target_machine, "check_alive", {"session_id": target_sid})
-
+    try:
+        if is_local:
+            alive = rpc_client.call("check_alive", {"session_id": target_sid})
+        else:
+            alive = rpc_client.call_remote(target_machine, "check_alive",
+                                           {"session_id": target_sid})
+    except KernelError:
+        alive = 0
     # 3. revive if dead
     if alive != 1:
         ev = evoke(target_sid)
-        if "failed" in str(ev):
-            return "failed, evoke: " + str(ev)
+        if not ev["ok"]:
+            return _err(Code.NOT_ALIVE, "evoke: " + str(ev.get("message")))
         deadline = time.time() + _REVIVE_WAIT
         while time.time() < deadline:
             time.sleep(1)
-            if is_local:
-                a = rpc_client.call("check_alive", {"session_id": target_sid})
-            else:
-                a = rpc_client.call_remote(target_machine, "check_alive", {"session_id": target_sid})
+            try:
+                if is_local:
+                    a = rpc_client.call("check_alive", {"session_id": target_sid})
+                else:
+                    a = rpc_client.call_remote(target_machine, "check_alive",
+                                               {"session_id": target_sid})
+            except KernelError:
+                a = 0
             if a == 1:
                 break
         else:
-            return "failed, target did not come alive after evoke (waited %ss)" % _REVIVE_WAIT
-
-    # 4. conversation store (host for cross-machine, else local)
+            return _err(Code.NOT_ALIVE,
+                        f"target did not come alive after evoke (waited {_REVIVE_WAIT}s)",
+                        retryable=True)
+    # 4. conversation store (host for cross-machine, else local) + active check
     conv_remote = _conv_store(target_sid)
+    info = _get_connection_info(caller_sid, target_sid, conv_remote)
+    if info and info.get("status") == "active":
+        if info.get("connection_id") == conn_id:
+            return _ok({"connection_id": conn_id, "reply": None,
+                        "established_at_ms": info.get("established_at_ms"),
+                        "reused": True})
+        return _err(Code.CONFLICT, "connection already active",
+                    data={"current_connection_id": info.get("connection_id"),
+                          "status": "active"})
     init_connect = 0 if _conv_exists(caller_sid, target_sid, conv_remote) else 1
-
-    # 5. register + send hello
+    # 5. register + send hello (kind=hello, correlation_id=connection_id)
     _register(caller_sid, target_sid, conv_remote)
     hello = ("connect hello from " + caller_sid + ". This is a p2p connection "
              "request - reply immediately with send_message(your_session_id, "
              + caller_sid + ", <any message>) to establish the channel.")
-    send_res = _send(caller_sid, target_sid, hello, conv_remote)
-    if "failed" in str(send_res):
+    try:
+        send_res = _send(caller_sid, target_sid, hello, conv_remote,
+                         correlation_id=conn_id, kind="hello")
+    except KernelError as e:
         if init_connect:
             _withdraw(caller_sid, target_sid, 1, conv_remote)
-        return "failed, send hello: " + str(send_res)
-    # Parse the hello's timestamp so _poll_reply can reject stale messages (C3):
-    # a prior [CONNECTION CLOSED] notice or the hello itself must not be read as
-    # the reply. send_res looks like "message_sent at <ts_ms>".
-    try:
-        if isinstance(send_res, dict):
-            hello_ts = send_res.get("ts") or 0
-        else:  # BRIDGE (removed in Task 5): legacy kernel string
-            hello_ts = int(str(send_res).rsplit("at ", 1)[1])
-    except (ValueError, IndexError, TypeError):
-        hello_ts = 0
-
-    # 6. in-process poll for the reply (Amd2 - no listener subprocess)
-    reply = _poll_reply(caller_sid, target_sid, hold_time, conv_remote, hello_ts)
+        return _kernel_err(e)
+    if send_res is None:
+        if init_connect:
+            _withdraw(caller_sid, target_sid, 1, conv_remote)
+        return _remote_err()
+    if not send_res.get("sent"):
+        if init_connect:
+            _withdraw(caller_sid, target_sid, 1, conv_remote)
+        return _err(Code.INTERNAL, "send hello: " + str(send_res.get("reason")))
+    hello_ts = send_res.get("ts") or 0
+    # 6. in-process poll for the correlation-matched reply (HP-05)
+    reply = _poll_reply(caller_sid, target_sid, hold_time, conv_remote,
+                        hello_ts, conn_id)
     if reply is not None:
-        return "connect succeed; reply: " + reply
-
+        act = _activate_connection(caller_sid, target_sid, conn_id, conv_remote)
+        if act and act.get("activated"):
+            return _ok({"connection_id": conn_id, "reply": reply,
+                        "established_at_ms": act.get("established_at_ms"),
+                        "reused": bool(act.get("reused"))})
+        # race: another connect activated first - report its state
+        info2 = _get_connection_info(caller_sid, target_sid, conv_remote)
+        if info2 and info2.get("connection_id") != conn_id:
+            return _err(Code.CONFLICT, "connection already active",
+                        data={"current_connection_id": info2.get("connection_id"),
+                              "status": info2.get("status")})
+        return _ok({"connection_id": conn_id, "reply": reply,
+                    "established_at_ms": int(time.time() * 1000), "reused": False})
     # 7. timeout -> clean up
     _withdraw(caller_sid, target_sid, init_connect, conv_remote)
-    return "connect failed, timeout waiting for reply"
+    return _err(Code.TIMEOUT, "timeout waiting for reply", retryable=True)
 
 
 def close_connection(session_id: str, toid: str, acked_ts: int = 0,

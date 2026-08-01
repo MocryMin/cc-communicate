@@ -184,21 +184,29 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
 
 
 @mcp.tool()
-def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
+def connect(caller_sid: str, target_sid: str, connection_id: str = None,
+            hold_time: int = 300) -> dict:
     """Establish a p2p connection to target_sid (local or cross-realm). If the
-    target is dead, revives it and waits for it to come alive, sends a hello,
-    then blocks up to hold_time seconds waiting for the reply. Returns
-    'connect succeed; reply: ...' on success, or a 'failed, ...' /
-    'connect failed, ...' string on failure. Connect BEFORE calling listen
-    (running a listener during connect can duplicate the reply). Once connect
-    succeeds the channel is ESTABLISHED: you MUST then call listen in a loop
-    (passing the watermark each call - see the listen tool) and keep it active
-    until you call close_connection."""
+    target is dead, revives it and waits for it to come alive, sends a hello
+    (kind=hello, correlation_id=connection_id), then blocks up to hold_time
+    seconds waiting for the correlation-matched reply. connection_id: caller-
+    supplied to make retries idempotent; omitted -> server generates one
+    (returned in the envelope data). One active connection per pair (D9): a
+    retry with the same id returns the current state; a different id while one
+    is active returns CONFLICT. Connect BEFORE calling listen (running a
+    listener during connect can duplicate the reply). Once connect succeeds the
+    channel is ESTABLISHED: you MUST then call listen in a loop (passing the
+    watermark each call - see the listen tool) and keep it active until you
+    call close_connection."""
     err = _entry_error((validation.validate_session_id, caller_sid),
                        (validation.validate_session_id, target_sid))
     if err:
         return err
-    return user_functions.connect(caller_sid, target_sid, hold_time)
+    if connection_id is not None:
+        err2 = _entry_error((validation.validate_connection_id, connection_id))
+        if err2:
+            return err2
+    return user_functions.connect(caller_sid, target_sid, connection_id, hold_time)
 
 
 @mcp.tool()

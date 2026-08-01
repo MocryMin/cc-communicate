@@ -353,7 +353,8 @@ _ARG_VALIDATORS = {
     "send_message": {"fromid": validation.validate_session_id,
                      "toid": validation.validate_session_id,
                      "message": validation.validate_message_size,
-                     "message_id": validation.validate_message_id},
+                     "message_id": validation.validate_message_id,
+                     "correlation_id": validation.validate_message_id},
     "register_conversation": {"sid_a": validation.validate_session_id,
                               "sid_b": validation.validate_session_id},
     "unregister_conversation": {"sid_a": validation.validate_session_id,
@@ -397,7 +398,8 @@ def _dispatch(function: str, args: dict):
     if function == "send_message":
         return kernel_api.send_message(
             alive_conversations, message_sequence, _local_store_id,
-            args["fromid"], args["toid"], args["message"], args.get("message_id"))
+            args["fromid"], args["toid"], args["message"], args.get("message_id"),
+            args.get("kind"), args.get("correlation_id"))
     if function == "register_conversation":
         return kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "unregister_conversation":
