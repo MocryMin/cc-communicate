@@ -73,6 +73,11 @@ def validate_connection_id(value) -> str:
     return _check_id(value, "connection_id")
 
 
+def validate_spawn_token(value) -> str:
+    """spawn_token: uuid4 hex or any id-charset token (HP-04)."""
+    return _check_id(value, "spawn_token")
+
+
 def validate_message_size(message) -> str:
     if not isinstance(message, str):
         raise InvalidArgumentError(

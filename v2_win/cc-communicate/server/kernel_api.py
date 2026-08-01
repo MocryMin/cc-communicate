@@ -25,7 +25,7 @@ import os
 import shutil
 import time
 
-from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE
+from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE, PENDING_SPAWN_DIR
 from proc import proc_start_time
 import conversations
 import fileutil
@@ -257,17 +257,60 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> dict:
     return {"evoked": True, "session_id": session_id}
 
 
-def spawn_cc_new(cwd: str, prompt: str) -> str:
-    """Kernel function for cross-machine create_collaborator (v2.1 §3.4.6): a
-    peer MCP server calls this via call_remote so THIS kernel spawns a local CC
-    (it knows its own claude path / spawn mechanism)."""
-    spawn.spawn_cc_new(cwd, prompt)
-    return "spawned"
+def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None) -> dict:
+    """Kernel function for (cross-machine) create_collaborator /
+    spawn_collaborator (v2.1 §3.4.6): a peer MCP server calls this via
+    call_remote so THIS kernel spawns a local CC (it knows its own claude path
+    / spawn mechanism). HP-04: writes pending_spawn/<token>.json BEFORE
+    spawning - the marker makes same-token retries safe (no double spawn) and
+    is the plan B claim record; the child gets the token via env (plan A)."""
+    if spawn_token:
+        validation.validate_spawn_token(spawn_token)
+        os.makedirs(PENDING_SPAWN_DIR, exist_ok=True)
+        fileutil.atomic_write_json(
+            os.path.join(PENDING_SPAWN_DIR, spawn_token + ".json"),
+            {"schema_version": 1, "spawn_token": spawn_token, "cwd": cwd,
+             "created_at_ms": int(time.time() * 1000)})
+    spawn.spawn_cc_new(cwd, prompt, spawn_token)
+    return {"spawned": True, "spawn_token": spawn_token}
 
 
 def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None) -> dict:
     spawn.spawn_cc_resume(session_id, prompt, cwd)
     return {"spawned": True, "session_id": session_id}
+
+
+# ---------- spawn tokens (HP-04 / D8) ----------
+# One map per kernel: spawn_token -> session_id. Populated by plan A (start
+# events carrying CC_COMMUNICATE_SPAWN_TOKEN) or plan B (claim_pending_spawn).
+# Rebuilt on kernel restart by start-event replay. The pending_spawn/<token>
+# marker file distinguishes "never spawned" from "spawned, not yet registered"
+# so a same-token retry never double-spawns.
+
+def find_session_by_token(spawn_tokens: dict, token: str):
+    return spawn_tokens.get(token)
+
+
+def has_pending_spawn(token: str) -> bool:
+    return os.path.isfile(os.path.join(PENDING_SPAWN_DIR, token + ".json"))
+
+
+def claim_pending_spawn(spawn_tokens: dict, token: str, session_id: str) -> dict:
+    """Plan B: the spawned worker claims its token on its first tool call.
+    Idempotent: an existing binding is kept (worker retries are no-ops)."""
+    validation.validate_spawn_token(token)
+    validation.validate_session_id(session_id)
+    existing = spawn_tokens.get(token)
+    if existing:
+        return {"claimed": True, "session_id": existing}
+    if not has_pending_spawn(token):
+        return {"claimed": False, "reason": "no pending spawn for token"}
+    spawn_tokens[token] = session_id
+    try:
+        os.remove(os.path.join(PENDING_SPAWN_DIR, token + ".json"))
+    except OSError:
+        pass
+    return {"claimed": True, "session_id": session_id}
 
 
 # ---------- listening (collect only; arm removed in Amd3) ----------

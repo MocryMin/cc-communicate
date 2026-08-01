@@ -23,15 +23,18 @@ _DETACHED_PROCESS = 0x00000008
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
-def _detached_popen(cmd_args, cwd=None):
+def _detached_popen(cmd_args, cwd=None, env=None):
     """Windows: detached process independent of parent, survives parent exit.
     `start` opens a new window for the interactive CC (it needs a TTY). cwd is
     set via Popen (not `start /D <path>`) so paths with spaces work, and so the
-    spawned/resumed CC's per-project lookup keys on the right cwd (T25)."""
+    spawned/resumed CC's per-project lookup keys on the right cwd (T25). env:
+    extra vars for the child (HP-04 spawn_token; inherited by cmd -> claude ->
+    SessionStart hook)."""
     subprocess.Popen(
         cmd_args,
         creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
         cwd=cwd,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -54,14 +57,18 @@ def _claude_bin() -> str:
     return "claude"  # last resort; on WSL this may hit the Windows version (C13)
 
 
-def _tmux_spawn(cwd: str, claude_argv: list):
+def _tmux_spawn(cwd: str, claude_argv: list, env_token: str = None):
     """WSL: detached tmux session (pty) running claude. Survives parent exit.
     `-c` sets cwd (equivalent to Windows `start /D`). Session name is unique
-    (time + pid) to avoid collisions on repeated evoke (C11)."""
+    (time + pid) to avoid collisions on repeated evoke (C11). env_token (HP-04):
+    the spawn token is set INSIDE the session via `env VAR=x claude` so claude
+    and its SessionStart hook see it."""
     session_name = f"cc_{int(time.time())}_{os.getpid()}"
     cmd = ["tmux", "new-session", "-d", "-s", session_name]
     if cwd:
         cmd += ["-c", cwd]
+    if env_token:
+        cmd += ["env", "CC_COMMUNICATE_SPAWN_TOKEN=" + env_token]
     cmd += claude_argv
     subprocess.Popen(
         cmd,
@@ -72,17 +79,23 @@ def _tmux_spawn(cwd: str, claude_argv: list):
     )
 
 
-def spawn_cc_new(cwd: str, prompt: str):
-    """Spawn a NEW interactive CC in cwd (for create_collaborator). `claude
-    <prompt>` (no -p) processes the prompt then enters the REPL (stays alive).
-    `--dangerously-skip-permissions` skips the workspace-trust dialog (Amd9).
-    cwd is set via Popen (T25) - robust to spaces; claude keys its project store
-    on cwd, so the new session lands in the right project dir."""
+def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None):
+    """Spawn a NEW interactive CC in cwd (for create_collaborator /
+    spawn_collaborator). `claude <prompt>` (no -p) processes the prompt then
+    enters the REPL (stays alive). `--dangerously-skip-permissions` skips the
+    workspace-trust dialog (Amd9). cwd is set via Popen (T25). spawn_token
+    (HP-04) is injected into the child environment so the SessionStart hook
+    can bind the session to its spawn request (plan A, D8)."""
     if os.name == "nt":
+        env = None
+        if spawn_token:
+            env = {**os.environ, "CC_COMMUNICATE_SPAWN_TOKEN": spawn_token}
         _detached_popen(["cmd", "/c", "start", "claude",
-                         "--dangerously-skip-permissions", prompt], cwd=cwd)
+                         "--dangerously-skip-permissions", prompt],
+                        cwd=cwd, env=env)
     else:
-        _tmux_spawn(cwd, [_claude_bin(), "--dangerously-skip-permissions", prompt])
+        _tmux_spawn(cwd, [_claude_bin(), "--dangerously-skip-permissions", prompt],
+                    env_token=spawn_token)
 
 
 def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None):
