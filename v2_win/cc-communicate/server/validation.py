@@ -67,6 +67,12 @@ def validate_store_id(value) -> str:
     return _check_id(value, "store_id")
 
 
+def validate_connection_id(value) -> str:
+    """connection_id: uuid4 hex or any id-charset token (same rule as
+    message_id - it doubles as a correlation key)."""
+    return _check_id(value, "connection_id")
+
+
 def validate_message_size(message) -> str:
     if not isinstance(message, str):
         raise InvalidArgumentError(

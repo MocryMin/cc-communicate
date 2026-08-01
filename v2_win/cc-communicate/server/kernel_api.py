@@ -427,6 +427,62 @@ def create_conversation_folder(id1: str, id2: str) -> dict:
     return {"ok": True}
 
 
+# ---------- connection metadata (HP-05 / D9) ----------
+# info.json is the single-active-connection authority: written by
+# activate_connection (enforced kernel-side - the kernel is the only writer),
+# read by get_connection_info, closed by deactivate_connection. A retry with
+# the SAME connection_id reuses; a different id while active is a CONFLICT.
+
+def get_connection_info(sid_a: str, sid_b: str):
+    """info.json for the pair, or None when absent/malformed."""
+    try:
+        with open(conversations.info_path(sid_a, sid_b), encoding="utf-8") as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def activate_connection(alive_conversations: dict, sid_a: str, sid_b: str,
+                        connection_id: str) -> dict:
+    """Register the pair + write info.json (status=active). Same connection_id
+    retry -> reuse (no-op). Different active connection_id -> conflict."""
+    validation.validate_connection_id(connection_id)
+    a, b = sorted([sid_a, sid_b])
+    existing = get_connection_info(a, b)
+    if existing and existing.get("status") == "active":
+        if existing.get("connection_id") == connection_id:
+            return {"activated": True, "connection_id": connection_id,
+                    "reused": True, "established_at_ms": existing.get("established_at_ms")}
+        return {"activated": False, "reason": "conflict",
+                "current_connection_id": existing.get("connection_id")}
+    register_conversation(alive_conversations, a, b)
+    info = {
+        "schema_version": 1,
+        "connection_id": connection_id,
+        "status": "active",
+        "established_at_ms": int(time.time() * 1000),
+        "sid_a": a,
+        "sid_b": b,
+    }
+    os.makedirs(conversations.conv_dir(a, b), exist_ok=True)
+    fileutil.atomic_write_json(conversations.info_path(a, b), info)
+    return {"activated": True, "connection_id": connection_id, "reused": False,
+            "established_at_ms": info["established_at_ms"]}
+
+
+def deactivate_connection(alive_conversations: dict, sid_a: str, sid_b: str) -> dict:
+    """Unregister + mark info.json status=closed (close_connection, HP-05)."""
+    a, b = sorted([sid_a, sid_b])
+    unregister_conversation(alive_conversations, a, b)
+    info = get_connection_info(a, b)
+    if info:
+        info["status"] = "closed"
+        info["closed_at_ms"] = int(time.time() * 1000)
+        fileutil.atomic_write_json(conversations.info_path(a, b), info)
+    return {"closed": True}
+
+
 # ---------- control ----------
 
 def kernel_terminate() -> dict:

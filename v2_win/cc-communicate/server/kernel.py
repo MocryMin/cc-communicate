@@ -276,6 +276,7 @@ def _handle_end(ev: dict, sid: str):
 _JOURNALED_FUNCTIONS = frozenset({
     "send_message", "register_conversation", "unregister_conversation",
     "withdraw", "create_conversation_folder", "upload_ack_timestamp",
+    "activate_connection", "deactivate_connection",
     "upload_cursor", "collect_messages", "spawn_cc_new", "spawn_cc_resume",
     "evoke", "kernel_terminate",
 })
@@ -370,6 +371,9 @@ _ARG_VALIDATORS = {
                         "cwd": validation.validate_cwd},
     "create_conversation_folder": {"id1": validation.validate_session_id,
                                    "id2": validation.validate_session_id},
+    "activate_connection": {"connection_id": validation.validate_connection_id},
+    "deactivate_connection": {},
+    "get_connection_info": {},
     "listen_scan_v2": {"sid": validation.validate_session_id},
     "query_cursors": {"sid": validation.validate_session_id},
     "upload_cursor": {"sid": validation.validate_session_id},
@@ -398,6 +402,13 @@ def _dispatch(function: str, args: dict):
         return kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "unregister_conversation":
         return kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
+    if function == "activate_connection":
+        return kernel_api.activate_connection(
+            alive_conversations, args["sid_a"], args["sid_b"], args["connection_id"])
+    if function == "get_connection_info":
+        return kernel_api.get_connection_info(args["sid_a"], args["sid_b"])
+    if function == "deactivate_connection":
+        return kernel_api.deactivate_connection(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "withdraw":
         return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0), args.get("message_id"))
     if function == "evoke":

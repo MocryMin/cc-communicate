@@ -103,6 +103,11 @@ def count_undelivered(session_id: str) -> int:
     return total
 
 
+def info_path(sid_a: str, sid_b: str) -> str:
+    """Path of the conversation's info.json (connection metadata, HP-05)."""
+    return os.path.join(conv_dir(sid_a, sid_b), "info.json")
+
+
 def parse_any_pipe_filename(name: str):
     """Normalize BOTH pipe filename formats (reader-side dispatcher, HP-01).
 
