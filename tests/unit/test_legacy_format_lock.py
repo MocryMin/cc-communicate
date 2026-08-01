@@ -16,7 +16,7 @@ def test_new_writer_format(server):
     convs = {}
     ka.register_conversation(convs, "alice", "bob")
     r = ka.send_message(convs, _seq_state(), "store-test", "alice", "bob", "hello")
-    assert r.startswith("message_sent at ")
+    assert r["sent"] is True
     d = server.conversations.conv_dir("alice", "bob")
     files = os.listdir(os.path.join(d, "pipe"))
     assert len(files) == 1

@@ -395,8 +395,11 @@ def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
     # a prior [CONNECTION CLOSED] notice or the hello itself must not be read as
     # the reply. send_res looks like "message_sent at <ts_ms>".
     try:
-        hello_ts = int(str(send_res).rsplit("at ", 1)[1])
-    except (ValueError, IndexError):
+        if isinstance(send_res, dict):
+            hello_ts = send_res.get("ts") or 0
+        else:  # BRIDGE (removed in Task 5): legacy kernel string
+            hello_ts = int(str(send_res).rsplit("at ", 1)[1])
+    except (ValueError, IndexError, TypeError):
         hello_ts = 0
 
     # 6. in-process poll for the reply (Amd2 - no listener subprocess)

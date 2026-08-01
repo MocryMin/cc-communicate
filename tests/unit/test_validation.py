@@ -80,7 +80,7 @@ def test_withdraw_init_connect_containment(server):
     with open(os.path.join(d, "pipe", "0000000000001__alice__bob.md"), "w") as f:
         f.write("hi")
     r = ka.withdraw(convs, "alice", "bob", 1)
-    assert r == "conversation withdrawn"
+    assert r == {"withdrawn": True, "detail": "conversation withdrawn"}
     assert not os.path.isdir(d)
     assert os.path.isdir(str(server.paths.CONVERSATIONS_DIR))  # 根还在
     # 非法 id：raise，且根目录毫发无损
@@ -158,7 +158,7 @@ def test_dispatch_passes_valid_args(server):
     with open(os.path.join(str(server.paths.QUEUE_RESPONSES_DIR), "r2.json"),
               encoding="utf-8") as f:
         resp = json.load(f)
-    assert resp == {"request_id": "r2", "result": "ok", "error": None}
+    assert resp == {"request_id": "r2", "result": {"ok": True}, "error": None}
 
 
 # ---------- spawn entry (create_collaborator) ----------

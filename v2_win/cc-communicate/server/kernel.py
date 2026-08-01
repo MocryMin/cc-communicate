@@ -395,11 +395,9 @@ def _dispatch(function: str, args: dict):
             alive_conversations, message_sequence, _local_store_id,
             args["fromid"], args["toid"], args["message"], args.get("message_id"))
     if function == "register_conversation":
-        kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
-        return "ok"
+        return kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "unregister_conversation":
-        kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
-        return "ok"
+        return kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "withdraw":
         return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0), args.get("message_id"))
     if function == "evoke":

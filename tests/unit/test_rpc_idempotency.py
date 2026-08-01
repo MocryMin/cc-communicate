@@ -37,7 +37,7 @@ def test_dispatch_path_roundtrip(server):
                     "args": {"sid_a": "alice", "sid_b": "bob"}})
     k.drain_queue()
     resp = _read_response(server.paths.QUEUE_RESPONSES_DIR, "d1")
-    assert resp == {"request_id": "d1", "result": "ok", "error": None}
+    assert resp == {"request_id": "d1", "result": {"ok": True}, "error": None}
     assert [f for f in os.listdir(str(server.paths.QUEUE_DIR)) if f.endswith(".json")] == []
     assert ("alice", "bob") in k.alive_conversations
 
@@ -118,8 +118,8 @@ def test_register_idempotent_via_journal(server):
     _write_request(server.paths.QUEUE_DIR, "0000000000002_b.json",
                    dict(req, request_id="r2"))
     k.drain_queue()
-    assert _read_response(server.paths.QUEUE_RESPONSES_DIR, "r1")["result"] == "ok"
-    assert _read_response(server.paths.QUEUE_RESPONSES_DIR, "r2")["result"] == "ok"
+    assert _read_response(server.paths.QUEUE_RESPONSES_DIR, "r1")["result"] == {"ok": True}
+    assert _read_response(server.paths.QUEUE_RESPONSES_DIR, "r2")["result"] == {"ok": True}
     assert list(k.alive_conversations) == [("alice", "bob")]
     assert k.operation_journal["op-reg-1"]["status"] == "completed"
 
@@ -136,11 +136,11 @@ def test_withdraw_by_message_id_idempotent(server):
     ka.send_message(k.alive_conversations, seq, LOCAL, "alice", "bob", "m2",
                     "b" * 32)
     r1 = ka.withdraw(k.alive_conversations, "alice", "bob", 0, message_id="a" * 32)
-    assert "withdrew" in r1
+    assert "withdrew" in r1["detail"]
     files = _pipe_files(server)
     assert len(files) == 1 and files[0].endswith("__" + "b" * 32 + ".json")
     r2 = ka.withdraw(k.alive_conversations, "alice", "bob", 0, message_id="a" * 32)
-    assert "no message" in r2  # already-done，不报错、不误删 m2
+    assert "no message" in r2["reason"]  # already-done，不报错、不误删 m2
     assert len(_pipe_files(server)) == 1
 
 

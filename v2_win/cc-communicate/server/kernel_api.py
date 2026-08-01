@@ -88,44 +88,48 @@ def check_alive(alive_sessions: dict, session_id: str) -> int:
 
 # ---------- conversation registration ----------
 
-def register_conversation(alive_conversations: dict, sid_a: str, sid_b: str):
+def register_conversation(alive_conversations: dict, sid_a: str, sid_b: str) -> dict:
     a, b = sorted([sid_a, sid_b])
     alive_conversations[(a, b)] = {"established_at": time.time()}
+    return {"ok": True}
 
 
-def unregister_conversation(alive_conversations: dict, sid_a: str, sid_b: str):
+def unregister_conversation(alive_conversations: dict, sid_a: str, sid_b: str) -> dict:
     a, b = sorted([sid_a, sid_b])
     alive_conversations.pop((a, b), None)
+    return {"ok": True}
 
 
 # ---------- messaging ----------
 
 def send_message(alive_conversations: dict, message_sequence: dict, store_id: str,
-                 fromid: str, toid: str, message: str, message_id: str = None) -> str:
+                 fromid: str, toid: str, message: str, message_id: str = None,
+                 kind: str = None, correlation_id: str = None) -> dict:
     """HP-01: allocate a per-store sequence, wrap the text in a v1 record,
-    atomically publish. The sequence counter is persisted BEFORE the message
-    (a crash in between leaves a gap - allowed; a sequence is never reused).
-    HP-03 dedup: a retry carrying the same message_id returns the ORIGINAL
-    result without publishing a duplicate. Return string keeps the legacy
-    'message_sent at <created_at_ms>' shape (connect parses it)."""
+    atomically publish. HP-03 dedup: a retry carrying the same message_id
+    returns the ORIGINAL result without publishing a duplicate. Structured
+    dict result (HP-07) - callers branch on 'sent', never on text."""
     a, b = sorted([fromid, toid])
     if (a, b) not in alive_conversations:
-        return "failed, connection not registered"
+        return {"sent": False, "reason": "connection not registered"}
     d = conversations.ensure_conv_dir(fromid, toid)
     if message_id:
         found = _find_message_file(d, message_id)
         if found:
             rec = message_record.read_record(found)
             ts = rec.get("created_at_ms", 0) if rec else 0
-            return f"message_sent at {ts}"
+            return {"sent": True, "message_id": message_id, "ts": ts,
+                    "correlation_id": rec.get("correlation_id") if rec else None}
     seq = int(message_sequence.get("last_allocated", 0)) + 1
     message_sequence["last_allocated"] = seq
     message_sequence["store_id"] = store_id
     fileutil.atomic_write_json(MESSAGE_SEQUENCE_FILE, message_sequence)
     rec = message_record.new_record(store_id, seq, fromid, toid, message,
-                                    message_id=message_id)
+                                    message_id=message_id, kind=kind or "text",
+                                    correlation_id=correlation_id)
     message_record.publish(d, rec)
-    return f"message_sent at {rec['created_at_ms']}"
+    return {"sent": True, "message_id": rec["message_id"], "ts": rec["created_at_ms"],
+            "correlation_id": correlation_id}
 
 
 def _find_message_file(conv_d: str, message_id: str):
@@ -163,17 +167,25 @@ def query_conversations(querier_sid: str) -> dict:
     return result
 
 
-def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: int = 0, message_id: str = None) -> str:
+def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: int = 0,
+             message_id: str = None) -> dict:
     if init_connect:
         # HP-06 destructive containment: conv_dir already validated both ids;
         # re-verify the resolved target is strictly under CONVERSATIONS_DIR and
         # IS the canonical pair dir before rmtree.
         d = conversations.conv_dir(fromid, toid)
         target = validation.resolve_under(CONVERSATIONS_DIR, os.path.basename(d))
+        a, b = sorted([fromid, toid])
+        # Structured no-op (HP-07): nothing on disk AND nothing registered ->
+        # withdrawn False, so a retry/cleanup can tell "already gone" apart
+        # from "just removed".
+        existed = os.path.isdir(target) or (a, b) in alive_conversations
         if os.path.isdir(target):
             shutil.rmtree(target)
         unregister_conversation(alive_conversations, fromid, toid)
-        return "conversation withdrawn"
+        if not existed:
+            return {"withdrawn": False, "reason": "conversation not found"}
+        return {"withdrawn": True, "detail": "conversation withdrawn"}
     if message_id:
         # HP-03: withdraw an EXPLICIT target (retry-safe). The legacy
         # latest-message mode below is non-idempotent by nature and remains
@@ -182,18 +194,21 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
         d = conversations.conv_dir(fromid, toid)
         found = _find_message_file(d, message_id)
         if not found or os.sep + "log" + os.sep in found:
-            return f"no message {message_id} (already withdrawn or never existed)"
+            return {"withdrawn": False,
+                    "reason": f"no message {message_id} (already withdrawn or never existed)"}
         try:
             os.remove(found)
         except OSError:
-            return f"no message {message_id} (already withdrawn or never existed)"
-        return f"withdrew message {message_id}"
+            return {"withdrawn": False,
+                    "reason": f"no message {message_id} (already withdrawn or never existed)"}
+        return {"withdrawn": True, "detail": f"withdrew message {message_id}",
+                "message_id": message_id}
     d = conversations.conv_dir(fromid, toid)
     pipe = os.path.join(d, "pipe")
     try:
         files = os.listdir(pipe)
     except FileNotFoundError:
-        return "no messages"
+        return {"withdrawn": False, "reason": "no messages"}
     candidates = []
     for f in files:
         info = conversations.parse_any_pipe_filename(f)
@@ -204,22 +219,22 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
         key = (1, info["sequence"]) if info["format"] == "record" else (0, info["ts"])
         candidates.append((key, f))
     if not candidates:
-        return f"no messages from {fromid}"
+        return {"withdrawn": False, "reason": f"no messages from {fromid}"}
     candidates.sort(key=lambda x: x[0])
     os.remove(os.path.join(pipe, candidates[-1][1]))
-    return f"withdrew latest message from {fromid}"
+    return {"withdrawn": True, "detail": f"withdrew latest message from {fromid}"}
 
 
 # ---------- process spawning ----------
 
-def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
+def evoke(sessions: dict, session_id: str, prompt: str = None) -> dict:
     """Revive a CC session by resuming it (core_plan "内核函数 5"). Uses
     `claude --resume <sid> <prompt>` so the SAME session_id is revived. The
     revived CC fires SessionStart -> process_session_ctrl_event updates
-    alive_sessions with the new pid. Returns 'failed, session unknown' if the
-    session isn't in sessions."""
+    alive_sessions with the new pid. Returns {'evoked': True, 'session_id'}
+    or {'evoked': False, 'reason': 'session unknown'}."""
     if session_id not in sessions:
-        return "failed, session unknown"
+        return {"evoked": False, "reason": "session unknown"}
     if prompt is None:
         prompt = ("You have been revived for p2p communication by cc-communicate. "
                   "Call my_session_id to learn your id, then call listen "
@@ -239,7 +254,7 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> str:
     # cwd (data/server/) and fails "No conversation found with session ID: <sid>".
     cwd = sessions.get(session_id, {}).get("cwd")
     spawn.spawn_cc_resume(session_id, prompt, cwd)
-    return "evoke spawned (resumed)"
+    return {"evoked": True, "session_id": session_id}
 
 
 def spawn_cc_new(cwd: str, prompt: str) -> str:
@@ -250,9 +265,9 @@ def spawn_cc_new(cwd: str, prompt: str) -> str:
     return "spawned"
 
 
-def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None) -> str:
+def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None) -> dict:
     spawn.spawn_cc_resume(session_id, prompt, cwd)
-    return "spawned"
+    return {"spawned": True, "session_id": session_id}
 
 
 # ---------- listening (collect only; arm removed in Amd3) ----------
@@ -405,16 +420,16 @@ def upload_ack_timestamp(acked_timestamps: dict, sid: str, ts: int) -> int:
 
 # ---------- conversation folder ----------
 
-def create_conversation_folder(id1: str, id2: str) -> str:
+def create_conversation_folder(id1: str, id2: str) -> dict:
     """Create the conversation folder (+ pipe/, log/) for a pair. The MCP server
     decides whether to call this locally or via call_remote (v2.1 §3.5.5)."""
     conversations.ensure_conv_dir(id1, id2)
-    return "ok"
+    return {"ok": True}
 
 
 # ---------- control ----------
 
-def kernel_terminate() -> str:
+def kernel_terminate() -> dict:
     """Request the kernel to exit on its next loop iteration (v2.1 §3.5.3).
     Writes a flag file the kernel loop polls. (The kernel runs as __main__, so
     `import kernel; kernel._exit_requested=True` would touch a DIFFERENT module
@@ -423,9 +438,9 @@ def kernel_terminate() -> str:
     try:
         os.makedirs(SERVER_DATA_DIR, exist_ok=True)
         open(TERMINATE_FLAG, "w").close()
-        return "terminate requested"
+        return {"terminated": True}
     except OSError as e:
-        return f"failed, {e}"
+        return {"terminated": False, "reason": str(e)}
 
 
 # ---------- session discovery ----------

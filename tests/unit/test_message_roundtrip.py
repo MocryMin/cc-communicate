@@ -10,7 +10,7 @@ def test_register_send_listen_ack_roundtrip(server):
     convs, acked = {}, {}
     ka.register_conversation(convs, "alice", "bob")
     r = ka.send_message(convs, _seq_state(), "store-test", "alice", "bob", "hello")
-    assert r.startswith("message_sent at ")
+    assert r["sent"] is True and r["ts"] > 0
 
     # bob 以 acked_ts=0 listen -> peek 到消息但不归档
     res = ka.listen_scan(acked, "bob", 0)
@@ -32,4 +32,4 @@ def test_send_requires_registration(server):
     ka = server.kernel_api
     convs = {}
     r = ka.send_message(convs, _seq_state(), "store-test", "alice", "bob", "hi")
-    assert r == "failed, connection not registered"
+    assert r == {"sent": False, "reason": "connection not registered"}

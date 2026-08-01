@@ -29,7 +29,7 @@ def test_burst_same_ms_no_overwrite(server, monkeypatch):
     ka.register_conversation(convs, "alice", "bob")
     for i in range(1000):
         r = _send(ka, convs, seq, "alice", "bob", f"m{i}")
-        assert r.startswith("message_sent at ")
+        assert r["sent"] is True and isinstance(r["ts"], int)
     files = _pipe_files(server)
     assert len(files) == 1000
     seqs, mids = set(), set()
