@@ -922,3 +922,11 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Confidence**: high — verified against the real double-fire events
   (session_by_pid(34392) -> sid); unit tests lock fallback/primary/unknown
   semantics.
+
+### T36 — Wave 2 D8 live probe: env→hook→SessionStart chain carries spawn_token (PLAN A CONFIRMED)
+
+- **Probe**: spawned a real CC via `cmd /c "set CC_COMMUNICATE_SPAWN_TOKEN=probe-tok-1 && start claude"`; the resulting `start_*.json` event carries `"spawn_token": "probe-tok-1 "` (sid 5041613c, source=startup). The env var survives cmd → claude → SessionStart hook → registrar.js. Plan A (env injection, D8) is live; plan B (pending_spawn claim) still lands as the idempotent fallback.
+- **Discovery (environment mechanic)**: real CC sessions on this machine resolve the plugin root to the REPO's `v2_win/cc-communicate` (their MCP children run `python -u .../v2_win/cc-communicate/server/mcp_server.py`) — NOT the installed copy at `~/.claude/plugins/cache/cc-communicate-local/cc-communicate/0.3.0` (ba35e31 snapshot, stale). Live gates therefore exercise the repo code directly; the installed copy needs no sync for wave testing.
+- **Artifact note**: `cmd set VAR=x && cmd2` includes the trailing space in the var (`probe-tok-1 `); real spawns inject via Python env dicts (`{**os.environ, ...}`), which have no such artifact. A trailing space would fail `validate_spawn_token` charset — harmless here since plan A only reads the env value as an association key, but noted for plan B's claim path (tokens come from Python-side uuid4 hex).
+- **Method**: live spawn on the user's desktop; event file inspected directly.
+- **Confidence**: high — the exact chain D8 worried about, verified end-to-end with the real hook binary.
