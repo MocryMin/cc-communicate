@@ -32,6 +32,26 @@ import spawn
 import machine_identity
 import uuid
 from paths import CONVERSATIONS_DIR, PLUGIN_ROOT, MACHINE_INFO_LOG_DIR
+from result import Code
+from rpc_client import KernelError
+
+
+def _ok(data=None):
+    return {"ok": True, "code": None, "message": None, "data": data, "retryable": False}
+
+
+def _err(code, message, data=None, retryable=False):
+    return {"ok": False, "code": code, "message": message, "data": data, "retryable": retryable}
+
+
+def _kernel_err(e: KernelError):
+    """Local kernel failure -> INTERNAL (entry validation already ran; a kernel
+    error here is a bug or a crashed kernel)."""
+    return _err(Code.INTERNAL, str(e))
+
+
+def _remote_err():
+    return _err(Code.PEER_UNREACHABLE, "peer machine unreachable")
 
 _REVIVE_WAIT = 30.0
 # Floor for create_collaborator hold_time. A freshly-spawned CC can take
@@ -110,13 +130,17 @@ def _register(caller, target, conv_remote):
         rpc_client.call_remote(conv_remote, "register_conversation", {"sid_a": caller, "sid_b": target})
 
 
-def _send(fromid, toid, message, conv_remote) -> str:
+def _send(fromid, toid, message, conv_remote, correlation_id=None, kind=None):
     # HP-01/HP-03: one message_id per LOGICAL send, generated here so every
     # funnel (send_message / connect hello / close notice) gets dedup for
     # free. The rpc layer reuses it as the operation_id, so a transport retry
     # replays the journaled result and a domain retry dedups on the filename.
     mid = uuid.uuid4().hex
     args = {"fromid": fromid, "toid": toid, "message": message, "message_id": mid}
+    if correlation_id is not None:
+        args["correlation_id"] = correlation_id
+    if kind is not None:
+        args["kind"] = kind
     if conv_remote is None:
         return rpc_client.call("send_message", args, operation_id=mid)
     return rpc_client.call_remote(conv_remote, "send_message", args, operation_id=mid)
@@ -139,6 +163,31 @@ def _unregister(sid, toid, conv_remote):
     if conv_remote is None:
         return rpc_client.call("unregister_conversation", {"sid_a": sid, "sid_b": toid})
     return rpc_client.call_remote(conv_remote, "unregister_conversation", {"sid_a": sid, "sid_b": toid})
+
+
+def _get_connection_info(sid_a, sid_b, conv_remote):
+    if conv_remote is None:
+        return rpc_client.call("get_connection_info", {"sid_a": sid_a, "sid_b": sid_b})
+    return rpc_client.call_remote(conv_remote, "get_connection_info",
+                                  {"sid_a": sid_a, "sid_b": sid_b})
+
+
+def _activate_connection(sid_a, sid_b, connection_id, conv_remote):
+    if conv_remote is None:
+        return rpc_client.call("activate_connection",
+                               {"sid_a": sid_a, "sid_b": sid_b,
+                                "connection_id": connection_id})
+    return rpc_client.call_remote(conv_remote, "activate_connection",
+                                  {"sid_a": sid_a, "sid_b": sid_b,
+                                   "connection_id": connection_id})
+
+
+def _deactivate_connection(sid_a, sid_b, conv_remote):
+    if conv_remote is None:
+        return rpc_client.call("deactivate_connection",
+                               {"sid_a": sid_a, "sid_b": sid_b})
+    return rpc_client.submit_remote_noblock(conv_remote, "deactivate_connection",
+                                            {"sid_a": sid_a, "sid_b": sid_b})
 
 
 def _conv_exists(caller, target, conv_remote) -> bool:
@@ -190,11 +239,14 @@ def _archive_reply(conv_remote, caller, fname, path):
         rpc_client.call_remote(conv_remote, "collect_messages", {"session_id": caller})
 
 
-def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
+def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0, connection_id=None):
     """Scan pipe_dir once for target's reply (toid==caller, fromid==target).
-    Returns the reply content (archiving the file), or None. Stale messages
-    (ts <= hello_ts) are skipped (C3). Dual reader (HP-01): for records the
-    envelope supplies ts/content."""
+    HP-05: a record whose correlation_id == connection_id is the reply -
+    foreign messages can never be misread. Legacy fallback (D9, one release):
+    when no correlation_id matches and EXACTLY ONE candidate exists (from/to +
+    newer than hello_ts), accept it - that is unambiguous. Returns the reply
+    content (archiving the file), or None."""
+    candidates = []
     for fname, path, info in _scan_pipe(pipe_dir, caller):
         if info["from_id"] != target:
             continue
@@ -206,8 +258,10 @@ def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
             content = (rec.get("payload") or {}).get("text")
             if content is None:
                 continue
+            corr = rec.get("correlation_id")
         else:
             ts = info["ts"]
+            corr = None
             try:
                 with open(path, encoding="utf-8") as f:
                     content = f.read()
@@ -215,91 +269,171 @@ def _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts=0):
                 continue  # C5: skip malformed/undecodable files
         if ts <= hello_ts:
             continue  # C3: stale (not newer than the hello) - skip
+        if connection_id is not None and corr == connection_id:
+            _archive_reply(conv_remote, caller, fname, path)
+            return content
+        candidates.append((fname, path, content))
+    if connection_id is not None and len(candidates) == 1:
+        fname, path, content = candidates[0]
         _archive_reply(conv_remote, caller, fname, path)
         return content
     return None
 
 
-def _poll_reply(caller, target, hold_time, conv_remote, hello_ts=0):
+def _poll_reply(caller, target, hold_time, conv_remote, hello_ts=0, connection_id=None):
     """Block up to hold_time scanning (in-process) for target's reply (a pipe
     file with toid==caller, fromid==target). Returns the reply content, or None
     on timeout. Reads content BEFORE archiving (Amd2: no false-timeout even if a
     stray listener races us). A final scan after the deadline catches a reply
     that landed in the last poll window. (T15) hello_ts filters stale messages
-    (C3)."""
+    (C3); connection_id selects the correlated reply (HP-05)."""
     pipe_dir = _pipe_dir_for(caller, target, conv_remote)
     deadline = time.time() + hold_time
     while time.time() < deadline:
-        reply = _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts)
+        reply = _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts, connection_id)
         if reply is not None:
             return reply
         time.sleep(0.5)
     # final scan: a reply may have landed in the last 0.5s poll window. (T15)
-    return _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts)
+    return _claim_reply(pipe_dir, caller, target, conv_remote, hello_ts, connection_id)
 
 
 # ---------- tools ----------
 
-def my_session_id() -> str:
+def my_session_id() -> dict:
     """Discover this CC's own session_id. Walks the process tree to the claude
     binary ancestor (resolve_claude, Amd1), then looks up the session by pid.
-    Returns the sid or 'failed, ...'."""
+    Returns ok(sid) or err(...)."""
     from proc import resolve_claude
     pid, _ = resolve_claude(os.getpid())
     if pid is None:
-        return "failed, could not find claude ancestor"
-    sid = rpc_client.call("session_by_pid", {"pid": pid})
-    return sid if sid else "failed, no session recorded for claude pid " + str(pid)
+        return _err(Code.INTERNAL, "could not find claude ancestor")
+    try:
+        sid = rpc_client.call("session_by_pid", {"pid": pid})
+    except KernelError as e:
+        return _kernel_err(e)
+    if not sid:
+        return _err(Code.NOT_FOUND, f"no session recorded for claude pid {pid}")
+    return _ok(sid)
 
 
-def query_session(session_id: str):
-    """Local first, then each registered peer machine (cross-realm fan-out)."""
-    r = rpc_client.call("query_session", {"session_id": session_id})
-    if r:
-        return r
+def query_session(session_id: str) -> dict:
+    """Local first, then each registered peer machine (cross-realm fan-out).
+    ok(session_inf) or ok(None) when unknown everywhere."""
+    try:
+        r = rpc_client.call("query_session", {"session_id": session_id})
+        if r:
+            return _ok(r)
+    except KernelError:
+        pass
     for m in read_machine_info_log():
         r = rpc_client.call_remote(m, "query_session", {"session_id": session_id})
         if r:
-            return r
-    return None
+            return _ok(r)
+    return _ok(None)
 
 
-def check_alive(session_id: str) -> int:
-    if rpc_client.call("check_alive", {"session_id": session_id}) == 1:
-        return 1
+def check_alive(session_id: str) -> dict:
+    """1 if the session is truly alive on this machine or any registered peer;
+    0 otherwise; err(INTERNAL) if the local kernel itself errors out."""
+    try:
+        if rpc_client.call("check_alive", {"session_id": session_id}) == 1:
+            return _ok(1)
+    except KernelError as e:
+        return _kernel_err(e)
     for m in read_machine_info_log():
         if rpc_client.call_remote(m, "check_alive", {"session_id": session_id}) == 1:
-            return 1
-    return 0
+            return _ok(1)
+    return _ok(0)
 
 
 def query_conversations(session_id: str) -> dict:
     """v2 dict format: {partner_sid: {...info}, ...}. Merges local + peers."""
     out = {}
-    local = rpc_client.call("query_conversations", {"session_id": session_id})
+    try:
+        local = rpc_client.call("query_conversations", {"session_id": session_id})
+    except KernelError:
+        local = None
     if isinstance(local, dict):
         out.update(local)
     for m in read_machine_info_log():
         r = rpc_client.call_remote(m, "query_conversations", {"session_id": session_id})
         if isinstance(r, dict):
             out.update(r)  # sid uniqueness -> drop dups
-    return out
+    return _ok(out)
 
 
-def send_message(fromid: str, toid: str, message: str) -> str:
-    """Route by the conversation store (host for cross-machine, else local)."""
+def send_message(fromid: str, toid: str, message: str,
+                 correlation_id: str = None, kind: str = None) -> dict:
+    """Route by the conversation store (host for cross-machine, else local).
+    ok({message_id, ts}) on success; err(NOT_FOUND) when the conversation is
+    not registered; err(INTERNAL/PEER_UNREACHABLE) on transport failure."""
     conv_remote = _conv_store(toid)
-    return _send(fromid, toid, message, conv_remote)
+    try:
+        r = _send(fromid, toid, message, conv_remote,
+                  correlation_id=correlation_id, kind=kind)
+    except KernelError as e:
+        return _kernel_err(e)
+    if r is None:
+        return _remote_err()
+    if r.get("sent"):
+        return _ok({"message_id": r.get("message_id"), "ts": r.get("ts")})
+    return _err(Code.NOT_FOUND, r.get("reason", "send failed"))
 
 
-def evoke(session_id: str) -> str:
+def evoke(session_id: str) -> dict:
     """Revive a dead CC on whatever machine it lives on (local or remote)."""
     is_local, machine = _find_target_machine(session_id)
     if not is_local and machine is None:
-        return "failed, session not exists"
-    if is_local:
-        return rpc_client.call("evoke", {"session_id": session_id})
-    return rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
+        return _err(Code.NOT_FOUND, "session not exists")
+    try:
+        if is_local:
+            r = rpc_client.call("evoke", {"session_id": session_id})
+        else:
+            r = rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
+    except KernelError as e:
+        return _kernel_err(e)
+    if r is None:
+        return _remote_err()
+    if r.get("evoked"):
+        return _ok({"evoked": True, "session_id": r.get("session_id")})
+    return _err(Code.NOT_FOUND, r.get("reason", "evoke failed"))
+
+
+def register_conversation(sid_a: str, sid_b: str) -> dict:
+    """Mark a LOCAL conversation active (low-level; connect handles routing).
+    Exposed for bootstrapping/testing."""
+    try:
+        r = rpc_client.call("register_conversation", {"sid_a": sid_a, "sid_b": sid_b})
+    except KernelError as e:
+        return _kernel_err(e)
+    return _ok(r if isinstance(r, dict) else {"ok": True})
+
+
+def unregister_conversation(sid_a: str, sid_b: str) -> dict:
+    """Mark a LOCAL conversation inactive (low-level)."""
+    try:
+        r = rpc_client.call("unregister_conversation", {"sid_a": sid_a, "sid_b": sid_b})
+    except KernelError as e:
+        return _kernel_err(e)
+    return _ok(r if isinstance(r, dict) else {"ok": True})
+
+
+def withdraw(fromid: str, toid: str, init_connect: int = 0,
+             message_id: str = None) -> dict:
+    """Withdraw a message or whole LOCAL conversation (low-level).
+    init_connect=1: remove the whole folder + unregister; =0: default legacy
+    mode withdraws fromid's latest undelivered message (non-idempotent).
+    message_id: withdraw that EXACT message (retry-safe; preferred)."""
+    try:
+        r = rpc_client.call("withdraw", {"fromid": fromid, "toid": toid,
+                                         "init_connect": init_connect,
+                                         "message_id": message_id})
+    except KernelError as e:
+        return _kernel_err(e)
+    if r and r.get("withdrawn"):
+        return _ok(r)
+    return _err(Code.NOT_FOUND, (r or {}).get("reason", "withdraw failed"))
 
 
 def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
@@ -339,74 +473,108 @@ def listen(session_id: str, acked_ts: int = 0, timeout: int = 30) -> dict:
                     watermark = wm
         if messages:
             messages.sort(key=lambda x: x.get("time", 0))
-            return {"messages": messages, "watermark": watermark}
+            return _ok({"messages": messages, "watermark": watermark})
         time.sleep(_LISTEN_POLL)
-    return {"messages": [], "watermark": acked_ts}
+    return _ok({"messages": [], "watermark": acked_ts})
 
 
-def connect(caller_sid: str, target_sid: str, hold_time: int = 300) -> str:
+def connect(caller_sid: str, target_sid: str, connection_id: str = None,
+            hold_time: int = 300) -> dict:
     """Establish a p2p connection to target_sid (Amd2 in-process poll + Phase 2
-    routing). Flow: find target's machine -> check_alive (revive if dead) ->
-    register + send hello on the conv store -> poll in-process for the reply ->
-    succeed / withdraw on fail. Blocks up to hold_time."""
+    routing). HP-05: connection_id (caller-supplied or generated) correlates
+    the reply via the hello's correlation_id; info.json enforces ONE active
+    connection per pair (D9) - a retry with the same id returns the current
+    state, a different id is CONFLICT. Blocks up to hold_time."""
+    hold_time = max(hold_time, _MIN_HOLD_TIME)
+    conn_id = connection_id or uuid.uuid4().hex
     # 1. locate target
     is_local, target_machine = _find_target_machine(target_sid)
     if not is_local and target_machine is None:
-        return "failed, target session not exists"
-
+        return _err(Code.NOT_FOUND, "target session not exists")
     # 2. check_alive on target's machine
-    if is_local:
-        alive = rpc_client.call("check_alive", {"session_id": target_sid})
-    else:
-        alive = rpc_client.call_remote(target_machine, "check_alive", {"session_id": target_sid})
-
+    try:
+        if is_local:
+            alive = rpc_client.call("check_alive", {"session_id": target_sid})
+        else:
+            alive = rpc_client.call_remote(target_machine, "check_alive",
+                                           {"session_id": target_sid})
+    except KernelError:
+        alive = 0
     # 3. revive if dead
     if alive != 1:
         ev = evoke(target_sid)
-        if "failed" in str(ev):
-            return "failed, evoke: " + str(ev)
+        if not ev["ok"]:
+            return _err(Code.NOT_ALIVE, "evoke: " + str(ev.get("message")))
         deadline = time.time() + _REVIVE_WAIT
         while time.time() < deadline:
             time.sleep(1)
-            if is_local:
-                a = rpc_client.call("check_alive", {"session_id": target_sid})
-            else:
-                a = rpc_client.call_remote(target_machine, "check_alive", {"session_id": target_sid})
+            try:
+                if is_local:
+                    a = rpc_client.call("check_alive", {"session_id": target_sid})
+                else:
+                    a = rpc_client.call_remote(target_machine, "check_alive",
+                                               {"session_id": target_sid})
+            except KernelError:
+                a = 0
             if a == 1:
                 break
         else:
-            return "failed, target did not come alive after evoke (waited %ss)" % _REVIVE_WAIT
-
-    # 4. conversation store (host for cross-machine, else local)
+            return _err(Code.NOT_ALIVE,
+                        f"target did not come alive after evoke (waited {_REVIVE_WAIT}s)",
+                        retryable=True)
+    # 4. conversation store (host for cross-machine, else local) + active check
     conv_remote = _conv_store(target_sid)
+    info = _get_connection_info(caller_sid, target_sid, conv_remote)
+    if info and info.get("status") == "active":
+        if info.get("connection_id") == conn_id:
+            return _ok({"connection_id": conn_id, "reply": None,
+                        "established_at_ms": info.get("established_at_ms"),
+                        "reused": True})
+        return _err(Code.CONFLICT, "connection already active",
+                    data={"current_connection_id": info.get("connection_id"),
+                          "status": "active"})
     init_connect = 0 if _conv_exists(caller_sid, target_sid, conv_remote) else 1
-
-    # 5. register + send hello
+    # 5. register + send hello (kind=hello, correlation_id=connection_id)
     _register(caller_sid, target_sid, conv_remote)
     hello = ("connect hello from " + caller_sid + ". This is a p2p connection "
              "request - reply immediately with send_message(your_session_id, "
              + caller_sid + ", <any message>) to establish the channel.")
-    send_res = _send(caller_sid, target_sid, hello, conv_remote)
-    if "failed" in str(send_res):
+    try:
+        send_res = _send(caller_sid, target_sid, hello, conv_remote,
+                         correlation_id=conn_id, kind="hello")
+    except KernelError as e:
         if init_connect:
             _withdraw(caller_sid, target_sid, 1, conv_remote)
-        return "failed, send hello: " + str(send_res)
-    # Parse the hello's timestamp so _poll_reply can reject stale messages (C3):
-    # a prior [CONNECTION CLOSED] notice or the hello itself must not be read as
-    # the reply. send_res looks like "message_sent at <ts_ms>".
-    try:
-        hello_ts = int(str(send_res).rsplit("at ", 1)[1])
-    except (ValueError, IndexError):
-        hello_ts = 0
-
-    # 6. in-process poll for the reply (Amd2 - no listener subprocess)
-    reply = _poll_reply(caller_sid, target_sid, hold_time, conv_remote, hello_ts)
+        return _kernel_err(e)
+    if send_res is None:
+        if init_connect:
+            _withdraw(caller_sid, target_sid, 1, conv_remote)
+        return _remote_err()
+    if not send_res.get("sent"):
+        if init_connect:
+            _withdraw(caller_sid, target_sid, 1, conv_remote)
+        return _err(Code.INTERNAL, "send hello: " + str(send_res.get("reason")))
+    hello_ts = send_res.get("ts") or 0
+    # 6. in-process poll for the correlation-matched reply (HP-05)
+    reply = _poll_reply(caller_sid, target_sid, hold_time, conv_remote,
+                        hello_ts, conn_id)
     if reply is not None:
-        return "connect succeed; reply: " + reply
-
+        act = _activate_connection(caller_sid, target_sid, conn_id, conv_remote)
+        if act and act.get("activated"):
+            return _ok({"connection_id": conn_id, "reply": reply,
+                        "established_at_ms": act.get("established_at_ms"),
+                        "reused": bool(act.get("reused"))})
+        # race: another connect activated first - report its state
+        info2 = _get_connection_info(caller_sid, target_sid, conv_remote)
+        if info2 and info2.get("connection_id") != conn_id:
+            return _err(Code.CONFLICT, "connection already active",
+                        data={"current_connection_id": info2.get("connection_id"),
+                              "status": info2.get("status")})
+        return _ok({"connection_id": conn_id, "reply": reply,
+                    "established_at_ms": int(time.time() * 1000), "reused": False})
     # 7. timeout -> clean up
     _withdraw(caller_sid, target_sid, init_connect, conv_remote)
-    return "connect failed, timeout waiting for reply"
+    return _err(Code.TIMEOUT, "timeout waiting for reply", retryable=True)
 
 
 def close_connection(session_id: str, toid: str, acked_ts: int = 0,
@@ -459,7 +627,13 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0,
                 {"sid_a": session_id, "sid_b": toid})
     except Exception:
         pass  # best-effort: never block the caller's exit on a notify/unregister failure
-    return {"closed": True}
+    # 2b. mark the connection closed (info.json status=closed; HP-05/D9) -
+    # routed like unregister (fire-and-forget if the conv is remote)
+    try:
+        _deactivate_connection(session_id, toid, conv_remote)
+    except Exception:
+        pass  # best-effort, like the notify above
+    return _ok({"closed": True})
 
 
 # ---------- cursor-ACK listening (HP-02; preferred over legacy listen) ----------
@@ -511,9 +685,9 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
             messages.sort(key=lambda m: (m.get("created_at_ms", 0),
                                          m.get("store_id") or "",
                                          m.get("sequence", 0)))
-            return {"messages": messages, "next_cursors": next_cursors}
+            return _ok({"messages": messages, "next_cursors": next_cursors})
         time.sleep(_LISTEN_POLL)
-    return {"messages": [], "next_cursors": cursors}
+    return _ok({"messages": [], "next_cursors": cursors})
 
 
 def query_my_cursors(session_id: str) -> dict:
@@ -531,10 +705,10 @@ def query_my_cursors(session_id: str) -> dict:
         rr = rpc_client.call_remote(host, "query_cursors", {"sid": session_id})
         if isinstance(rr, dict):
             out.update(rr)
-    return out
+    return _ok(out)
 
 
-def query_my_ACK_timestamp(session_id: str) -> int:
+def query_my_ACK_timestamp(session_id: str) -> dict:
     """Recover the kernel's stored ACK watermark for session_id (T24). Call this
     after a compact / long gap / kernel restart if you've lost your latest ts,
     then use the returned value as `acked_ts` on your next listen."""
@@ -542,59 +716,172 @@ def query_my_ACK_timestamp(session_id: str) -> int:
         r = rpc_client.call("query_ack_timestamp", {"sid": session_id})
     except Exception:
         r = 0
-    return r if isinstance(r, int) else 0
+    return _ok(r if isinstance(r, int) else 0)
+
+
+# ---------- spawn_collaborator (HP-04) ----------
+
+def _spawn_prompt(token: str) -> str:
+    return ("You are a new collaborator spawned by cc-communicate. "
+            "First call my_session_id to learn your id. Then call "
+            f"claim_pending_spawn('{token}', <your_id>) - one call; it is a "
+            "no-op if your session was already claimed. Then call listen "
+            "(your_id, acked_ts, timeout) - it blocks and returns "
+            "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
+            "every later listen pass the watermark the previous listen "
+            "returned (this lets the kernel archive only what you've "
+            "confirmed - never drop or duplicate it). When a peer sends you "
+            "a hello (kind=hello, carrying a correlation_id), reply with "
+            "send_message(your_id, peer_id, <message>, correlation_id=<the "
+            "hello's correlation_id>). KEEP LISTENING: after each listen "
+            "returns, process any messages and call listen again (with the "
+            "latest watermark), in a loop, until you call close_connection("
+            "your_id, peer_id, your_latest_watermark) to end the "
+            "conversation. If you ever lose your watermark (compact / long "
+            "gap), call query_my_ACK_timestamp(your_id) to recover it. "
+            "Never invoke listen.py directly, never write a shell loop, "
+            "never nohup a listener - only use the listen tool.")
+
+
+def _find_session_by_token(token: str, machine: dict = None):
+    if machine is None:
+        return rpc_client.call("find_session_by_token", {"token": token})
+    return rpc_client.call_remote(machine, "find_session_by_token", {"token": token})
+
+
+def _has_pending_spawn(token: str, machine: dict = None):
+    if machine is None:
+        return rpc_client.call("has_pending_spawn", {"token": token})
+    return rpc_client.call_remote(machine, "has_pending_spawn", {"token": token})
+
+
+def _spawn_new(cwd: str, prompt: str, spawn_token: str, machine: dict = None):
+    if machine is None:
+        return rpc_client.call("spawn_cc_new",
+                               {"cwd": cwd, "prompt": prompt,
+                                "spawn_token": spawn_token})
+    return rpc_client.call_remote(machine, "spawn_cc_new",
+                                  {"cwd": cwd, "prompt": prompt,
+                                   "spawn_token": spawn_token})
+
+
+def _worker_handle(session_id: str, spawn_token: str, cwd: str,
+                   machine: dict = None) -> dict:
+    machine_id = (machine or {}).get("id")
+    if not machine_id:
+        machine_id = machine_identity.load_or_create().get("id")
+    return {"session_id": session_id, "machine_id": machine_id, "cwd": cwd,
+            "spawn_token": spawn_token, "connection_status": "registered"}
+
+
+def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
+                       machine: dict = None, hold_time: int = 300) -> dict:
+    """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it
+    to register, and return a structured WorkerHandle - NO auto-connect (the
+    caller decides when to call connect). spawn_token: caller-supplied (or
+    server-generated, returned in the handle); a retry with the SAME token
+    returns the original handle instead of spawning again. HP-04."""
+    token = spawn_token or uuid.uuid4().hex
+    # same-token retry: already registered -> original handle
+    try:
+        sid = _find_session_by_token(token, machine)
+    except KernelError as e:
+        return _kernel_err(e)
+    if sid:
+        return _ok(_worker_handle(sid, token, cwd, machine))
+    # in-flight (pending marker) -> don't re-spawn
+    try:
+        pending = _has_pending_spawn(token, machine)
+    except KernelError as e:
+        return _kernel_err(e)
+    if pending is None:
+        return _remote_err()
+    if not pending:
+        try:
+            r = _spawn_new(cwd, _spawn_prompt(token), token, machine)
+        except KernelError as e:
+            return _kernel_err(e)
+        if r is None:
+            return _remote_err()
+    # poll for registration (token -> sid; plan A hook event or plan B claim)
+    deadline = time.time() + 30
+    sid = None
+    while time.time() < deadline:
+        time.sleep(1)
+        try:
+            sid = _find_session_by_token(token, machine)
+        except KernelError:
+            sid = None
+        if sid:
+            break
+    if not sid:
+        return _err(Code.TIMEOUT,
+                    "new session did not register within 30s (is the plugin "
+                    "installed for new CCs?)", retryable=True)
+    return _ok(_worker_handle(sid, token, cwd, machine))
+
+
+def claim_pending_spawn(spawn_token: str, session_id: str) -> dict:
+    """Plan B (D8): a spawned worker claims its token on first tool use so
+    spawn_collaborator's registration poll can resolve. Idempotent."""
+    try:
+        r = rpc_client.call("claim_pending_spawn",
+                            {"token": spawn_token, "session_id": session_id})
+    except KernelError as e:
+        return _kernel_err(e)
+    if r and r.get("claimed"):
+        return _ok({"claimed": True, "session_id": r.get("session_id")})
+    return _err(Code.NOT_FOUND, (r or {}).get("reason", "no pending spawn for token"))
+
+
+# The legacy spawn prompt below is kept EXACTLY as today (per the brief), so
+# workers spawned via the legacy path keep replying WITHOUT correlation_id and
+# keep exercising connect's D9 legacy fallback. spawn_collaborator (the new
+# path) uses _spawn_prompt above, whose correlation_id instruction makes the
+# worker reply selectable by HP-05.
+_LEGACY_SPAWN_PROMPT = ("You are a new collaborator spawned by cc-communicate. "
+                        "First call my_session_id to learn your id. Then call listen "
+                        "(your_id, acked_ts, timeout) - it blocks and returns "
+                        "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
+                        "every later listen pass the watermark the previous listen "
+                        "returned (this lets the kernel archive only what you've "
+                        "confirmed - never drop or duplicate it). When a peer sends you "
+                        "a hello, reply with send_message(your_id, peer_id, <message>) "
+                        "- do NOT call connect to reply. KEEP LISTENING: after each "
+                        "listen returns, process any messages and call listen again "
+                        "(with the latest watermark), in a loop, until you call "
+                        "close_connection(your_id, peer_id, your_latest_watermark) to "
+                        "end the conversation. If you ever lose your watermark (compact / "
+                        "long gap), call query_my_ACK_timestamp(your_id) to recover it. "
+                        "Never invoke listen.py directly, never write a shell loop, never "
+                        "nohup a listener - only use the listen tool.")
 
 
 def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
                         machine=None) -> str:
-    """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it to
-    register, then connect. The new CC must have the plugin installed."""
-    # Enforce a floor: the spawned CC cold-starts (boot + tool load +
-    # listener + reply) and can exceed 120s on Windows; a shorter hold_time
-    # races _poll_reply. See T15. (hold_time default 300 == the floor.)
+    """LEGACY wrapper (one release, HP-07): spawn + connect, returns the
+    legacy string shape. New code should use spawn_collaborator (structured
+    WorkerHandle) + connect. The spawn prompt stays the OLD text so its
+    correlation_id-less replies exercise connect's legacy fallback (D9)."""
     hold_time = max(hold_time, _MIN_HOLD_TIME)
-    prompt = ("You are a new collaborator spawned by cc-communicate. "
-              "First call my_session_id to learn your id. Then call listen "
-              "(your_id, acked_ts, timeout) - it blocks and returns "
-              "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
-              "every later listen pass the watermark the previous listen "
-              "returned (this lets the kernel archive only what you've "
-              "confirmed - never drop or duplicate it). When a peer sends you "
-              "a hello, reply with send_message(your_id, peer_id, <message>) "
-              "- do NOT call connect to reply. KEEP LISTENING: after each "
-              "listen returns, process any messages and call listen again "
-              "(with the latest watermark), in a loop, until you call "
-              "close_connection(your_id, peer_id, your_latest_watermark) to "
-              "end the conversation. If you ever lose your watermark (compact / "
-              "long gap), call query_my_ACK_timestamp(your_id) to recover it. "
-              "Never invoke listen.py directly, never write a shell loop, never "
-              "nohup a listener - only use the listen tool.")
-    since_ts = int(time.time() * 1000)
-    if machine is None:
-        spawn.spawn_cc_new(cwd, prompt)
-        find = lambda: rpc_client.call("find_new_session", {"cwd": cwd, "since_ts": since_ts})
-    else:
-        rpc_client.call_remote(machine, "spawn_cc_new", {"cwd": cwd, "prompt": prompt})
-        find = lambda: rpc_client.call_remote(machine, "find_new_session",
-                                              {"cwd": cwd, "since_ts": since_ts})
-    deadline = time.time() + 30
-    new_sid = None
-    while time.time() < deadline:
-        time.sleep(1)
-        new_sid = find()
-        if new_sid:
-            break
-    if not new_sid:
-        return "failed, new session did not register within 30s (is the plugin installed for new CCs?)"
-    return connect(caller_sid, new_sid, hold_time)
+    res = spawn_collaborator(caller_sid, cwd, spawn_token=None,
+                             machine=machine, hold_time=hold_time)
+    if not res["ok"]:
+        return "failed, " + str(res.get("message"))
+    handle = res["data"]
+    cr = connect(caller_sid, handle["session_id"], hold_time=hold_time)
+    if cr["ok"]:
+        reply = (cr["data"] or {}).get("reply")
+        return ("connect succeed; reply: " + reply) if reply else "connect succeed"
+    return "connect failed, " + str(cr.get("message"))
 
 
 def query_machines() -> dict:
     """Registered peer machines: {id: entry, ...}."""
-    return {m.get("id"): m for m in read_machine_info_log()}
+    return _ok({m.get("id"): m for m in read_machine_info_log()})
 
 
-def help_connect_machines() -> str:
+def help_connect_machines() -> dict:
     """Return the cross-machine handshake playbook (C4). The CC calls this when
     the user wants to link this machine to a peer (e.g. 'help me connect
     machines', 'connect WSL to host', 'register the other machine'), then follows
@@ -603,6 +890,6 @@ def help_connect_machines() -> str:
     guide_path = os.path.join(PLUGIN_ROOT, "server", "handshake_guide.md")
     try:
         with open(guide_path, encoding="utf-8") as f:
-            return f.read()
+            return _ok(f.read())
     except OSError as e:
-        return "handshake guide not found at %s: %s" % (guide_path, e)
+        return _err(Code.NOT_FOUND, f"handshake guide not found at {guide_path}: {e}")

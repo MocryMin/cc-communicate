@@ -33,7 +33,7 @@ from paths import (
     CONVERSATIONS_DIR, CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
     SESSION_CTRL_DIR, QUEUE_DIR, QUEUE_RESPONSES_DIR, SESSIONS_FILE,
     ALIVE_CONVS_FILE, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE,
-    OPERATION_JOURNAL_FILE, ensure_runtime_dirs,
+    OPERATION_JOURNAL_FILE, PENDING_SPAWN_DIR, ensure_runtime_dirs,
 )
 from proc import proc_start_time, parse_start_time
 
@@ -53,6 +53,7 @@ acked_timestamps: dict = {}  # T24: sid -> latest confirmed ACK watermark (persi
 message_sequence: dict = {}  # HP-01: {"schema_version","store_id","last_allocated"}
 cursors: dict = {}  # HP-02: sid -> {store_id: confirmed sequence} (persisted)
 operation_journal: dict = {}  # HP-03: operation_id -> completed mutation record
+spawn_tokens: dict = {}  # HP-04: spawn_token -> session_id (rebuilt from event replay)
 _local_store_id: str = "unknown"
 _last_activity: float = 0.0
 
@@ -260,12 +261,25 @@ def _handle_start(ev: dict, sid: str):
     if len(known) > 8:
         for old_pid in sorted(known, key=known.get)[:-8]:
             known.pop(old_pid, None)
+    # HP-04: a start event carrying CC_COMMUNICATE_SPAWN_TOKEN binds the
+    # session to its spawn request (plan A). Rebuilt on kernel restart via
+    # event replay, so the map needs no separate persistence.
+    tok = ev.get("spawn_token")
+    if tok:
+        spawn_tokens[tok] = sid
+        try:
+            os.remove(os.path.join(PENDING_SPAWN_DIR, tok + ".json"))
+        except OSError:
+            pass
 
 
 def _handle_end(ev: dict, sid: str):
     alive_sessions.pop(sid, None)
     if sid in sessions:
         sessions[sid]["ended_at"] = ev.get("event_ts")
+    for tok, s in list(spawn_tokens.items()):
+        if s == sid:
+            spawn_tokens.pop(tok, None)
 
 
 # HP-03: mutations whose retry must not re-execute side effects. High-frequency
@@ -276,6 +290,7 @@ def _handle_end(ev: dict, sid: str):
 _JOURNALED_FUNCTIONS = frozenset({
     "send_message", "register_conversation", "unregister_conversation",
     "withdraw", "create_conversation_folder", "upload_ack_timestamp",
+    "activate_connection", "deactivate_connection",
     "upload_cursor", "collect_messages", "spawn_cc_new", "spawn_cc_resume",
     "evoke", "kernel_terminate",
 })
@@ -352,7 +367,8 @@ _ARG_VALIDATORS = {
     "send_message": {"fromid": validation.validate_session_id,
                      "toid": validation.validate_session_id,
                      "message": validation.validate_message_size,
-                     "message_id": validation.validate_message_id},
+                     "message_id": validation.validate_message_id,
+                     "correlation_id": validation.validate_message_id},
     "register_conversation": {"sid_a": validation.validate_session_id,
                               "sid_b": validation.validate_session_id},
     "unregister_conversation": {"sid_a": validation.validate_session_id,
@@ -365,11 +381,19 @@ _ARG_VALIDATORS = {
     "listen_scan": {"sid": validation.validate_session_id},
     "query_ack_timestamp": {"sid": validation.validate_session_id},
     "upload_ack_timestamp": {"sid": validation.validate_session_id},
-    "spawn_cc_new": {"cwd": validation.validate_cwd},
+    "spawn_cc_new": {"cwd": validation.validate_cwd,
+                     "spawn_token": validation.validate_spawn_token},
+    "find_session_by_token": {"token": validation.validate_spawn_token},
+    "has_pending_spawn": {"token": validation.validate_spawn_token},
+    "claim_pending_spawn": {"token": validation.validate_spawn_token,
+                            "session_id": validation.validate_session_id},
     "spawn_cc_resume": {"session_id": validation.validate_session_id,
                         "cwd": validation.validate_cwd},
     "create_conversation_folder": {"id1": validation.validate_session_id,
                                    "id2": validation.validate_session_id},
+    "activate_connection": {"connection_id": validation.validate_connection_id},
+    "deactivate_connection": {},
+    "get_connection_info": {},
     "listen_scan_v2": {"sid": validation.validate_session_id},
     "query_cursors": {"sid": validation.validate_session_id},
     "upload_cursor": {"sid": validation.validate_session_id},
@@ -393,13 +417,19 @@ def _dispatch(function: str, args: dict):
     if function == "send_message":
         return kernel_api.send_message(
             alive_conversations, message_sequence, _local_store_id,
-            args["fromid"], args["toid"], args["message"], args.get("message_id"))
+            args["fromid"], args["toid"], args["message"], args.get("message_id"),
+            args.get("kind"), args.get("correlation_id"))
     if function == "register_conversation":
-        kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
-        return "ok"
+        return kernel_api.register_conversation(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "unregister_conversation":
-        kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
-        return "ok"
+        return kernel_api.unregister_conversation(alive_conversations, args["sid_a"], args["sid_b"])
+    if function == "activate_connection":
+        return kernel_api.activate_connection(
+            alive_conversations, args["sid_a"], args["sid_b"], args["connection_id"])
+    if function == "get_connection_info":
+        return kernel_api.get_connection_info(args["sid_a"], args["sid_b"])
+    if function == "deactivate_connection":
+        return kernel_api.deactivate_connection(alive_conversations, args["sid_a"], args["sid_b"])
     if function == "withdraw":
         return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0), args.get("message_id"))
     if function == "evoke":
@@ -425,7 +455,13 @@ def _dispatch(function: str, args: dict):
     if function == "find_new_session":
         return kernel_api.find_new_session(sessions, args["cwd"], args.get("since_ts", 0))
     if function == "spawn_cc_new":
-        return kernel_api.spawn_cc_new(args["cwd"], args["prompt"])
+        return kernel_api.spawn_cc_new(args["cwd"], args["prompt"], args.get("spawn_token"))
+    if function == "find_session_by_token":
+        return kernel_api.find_session_by_token(spawn_tokens, args["token"])
+    if function == "has_pending_spawn":
+        return kernel_api.has_pending_spawn(args["token"])
+    if function == "claim_pending_spawn":
+        return kernel_api.claim_pending_spawn(spawn_tokens, args["token"], args["session_id"])
     if function == "spawn_cc_resume":
         return kernel_api.spawn_cc_resume(args["session_id"], args["prompt"], args.get("cwd"))
     if function == "create_conversation_folder":

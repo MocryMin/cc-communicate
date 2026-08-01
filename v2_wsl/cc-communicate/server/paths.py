@@ -28,6 +28,7 @@ QUEUE_DIR           = os.path.join(DATA_DIR, 'queue')         # RPC request file
 QUEUE_RESPONSES_DIR = os.path.join(QUEUE_DIR, 'responses')    # RPC response files (kernel -> tool)
 CONVERSATIONS_DIR   = os.path.join(DATA_DIR, 'conversations') # p2p message pipes + logs
 MACHINE_INFO_LOG_DIR = os.path.join(DATA_DIR, 'machine_info_log')  # registered peer machines (v2.2 Amd7)
+PENDING_SPAWN_DIR   = os.path.join(DATA_DIR, 'pending_spawn')  # HP-04: spawn-token claim markers
 
 CORE_STATUS_FILE    = os.path.join(SERVER_DATA_DIR, 'core_status.json')
 SESSIONS_FILE       = os.path.join(SERVER_DATA_DIR, 'sessions.json')  # persistent session registry
@@ -44,5 +45,5 @@ def ensure_runtime_dirs():
     """Create the runtime data directories the upper layer needs. Idempotent."""
     for d in (DATA_DIR, SESSION_CTRL_DIR, SERVER_DATA_DIR,
               QUEUE_DIR, QUEUE_RESPONSES_DIR, CONVERSATIONS_DIR,
-              MACHINE_INFO_LOG_DIR):
+              MACHINE_INFO_LOG_DIR, PENDING_SPAWN_DIR):
         os.makedirs(d, exist_ok=True)
