@@ -266,6 +266,44 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
 
 
 @mcp.tool()
+def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
+                       permission_mode: str = "bypass", machine: dict = None,
+                       hold_time: int = 300) -> dict:
+    """Spawn a NEW CC in cwd (on `machine` if given - a query_machines entry -
+    else this machine) and wait for it to register. Returns the envelope with
+    a structured WorkerHandle in data: {session_id, machine_id, cwd,
+    spawn_token, connection_status}. Does NOT auto-connect - call connect when
+    you want the channel. spawn_token: caller-supplied to make retries
+    idempotent (same token -> same handle, no second spawn); omitted -> server
+    generates one (returned in the handle). permission_mode: accepted now
+    (default 'bypass' = current behavior); Wave 3 HP-10 flips the default to
+    'standard' per D4 - the parameter surface never changes."""
+    err = validation.validate_spawn_entry(caller_sid, cwd, machine)
+    if err:
+        return {"ok": False, "code": Code.INVALID_ARGUMENT,
+                "message": err, "data": None, "retryable": False}
+    if spawn_token is not None:
+        err2 = _entry_error((validation.validate_spawn_token, spawn_token))
+        if err2:
+            return err2
+    return user_functions.spawn_collaborator(caller_sid, cwd, spawn_token,
+                                             machine, hold_time)
+
+
+@mcp.tool()
+def claim_pending_spawn(spawn_token: str, session_id: str) -> dict:
+    """Claim a pending spawn token (plan B, HP-04): a spawned worker calls
+    this on its FIRST tool use so the spawner's registration poll can resolve.
+    Idempotent - safe to call more than once. Returns ok({claimed, session_id})
+    or err(NOT_FOUND) when no pending spawn matches the token."""
+    err = _entry_error((validation.validate_spawn_token, spawn_token),
+                       (validation.validate_session_id, session_id))
+    if err:
+        return err
+    return user_functions.claim_pending_spawn(spawn_token, session_id)
+
+
+@mcp.tool()
 def query_machines() -> dict:
     """Registered peer machines: {id: {type, data_dir, ...}, ...}. Returns the
     envelope: ok(machines)."""

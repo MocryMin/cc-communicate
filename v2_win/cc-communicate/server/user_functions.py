@@ -719,48 +719,161 @@ def query_my_ACK_timestamp(session_id: str) -> dict:
     return _ok(r if isinstance(r, int) else 0)
 
 
-def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
-                        machine=None) -> str:
-    """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it to
-    register, then connect. The new CC must have the plugin installed."""
-    # Enforce a floor: the spawned CC cold-starts (boot + tool load +
-    # listener + reply) and can exceed 120s on Windows; a shorter hold_time
-    # races _poll_reply. See T15. (hold_time default 300 == the floor.)
-    hold_time = max(hold_time, _MIN_HOLD_TIME)
-    prompt = ("You are a new collaborator spawned by cc-communicate. "
-              "First call my_session_id to learn your id. Then call listen "
-              "(your_id, acked_ts, timeout) - it blocks and returns "
-              "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
-              "every later listen pass the watermark the previous listen "
-              "returned (this lets the kernel archive only what you've "
-              "confirmed - never drop or duplicate it). When a peer sends you "
-              "a hello, reply with send_message(your_id, peer_id, <message>) "
-              "- do NOT call connect to reply. KEEP LISTENING: after each "
-              "listen returns, process any messages and call listen again "
-              "(with the latest watermark), in a loop, until you call "
-              "close_connection(your_id, peer_id, your_latest_watermark) to "
-              "end the conversation. If you ever lose your watermark (compact / "
-              "long gap), call query_my_ACK_timestamp(your_id) to recover it. "
-              "Never invoke listen.py directly, never write a shell loop, never "
-              "nohup a listener - only use the listen tool.")
-    since_ts = int(time.time() * 1000)
+# ---------- spawn_collaborator (HP-04) ----------
+
+def _spawn_prompt(token: str) -> str:
+    return ("You are a new collaborator spawned by cc-communicate. "
+            "First call my_session_id to learn your id. Then call "
+            f"claim_pending_spawn('{token}', <your_id>) - one call; it is a "
+            "no-op if your session was already claimed. Then call listen "
+            "(your_id, acked_ts, timeout) - it blocks and returns "
+            "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
+            "every later listen pass the watermark the previous listen "
+            "returned (this lets the kernel archive only what you've "
+            "confirmed - never drop or duplicate it). When a peer sends you "
+            "a hello (kind=hello, carrying a correlation_id), reply with "
+            "send_message(your_id, peer_id, <message>, correlation_id=<the "
+            "hello's correlation_id>). KEEP LISTENING: after each listen "
+            "returns, process any messages and call listen again (with the "
+            "latest watermark), in a loop, until you call close_connection("
+            "your_id, peer_id, your_latest_watermark) to end the "
+            "conversation. If you ever lose your watermark (compact / long "
+            "gap), call query_my_ACK_timestamp(your_id) to recover it. "
+            "Never invoke listen.py directly, never write a shell loop, "
+            "never nohup a listener - only use the listen tool.")
+
+
+def _find_session_by_token(token: str, machine: dict = None):
     if machine is None:
-        spawn.spawn_cc_new(cwd, prompt)
-        find = lambda: rpc_client.call("find_new_session", {"cwd": cwd, "since_ts": since_ts})
-    else:
-        rpc_client.call_remote(machine, "spawn_cc_new", {"cwd": cwd, "prompt": prompt})
-        find = lambda: rpc_client.call_remote(machine, "find_new_session",
-                                              {"cwd": cwd, "since_ts": since_ts})
+        return rpc_client.call("find_session_by_token", {"token": token})
+    return rpc_client.call_remote(machine, "find_session_by_token", {"token": token})
+
+
+def _has_pending_spawn(token: str, machine: dict = None):
+    if machine is None:
+        return rpc_client.call("has_pending_spawn", {"token": token})
+    return rpc_client.call_remote(machine, "has_pending_spawn", {"token": token})
+
+
+def _spawn_new(cwd: str, prompt: str, spawn_token: str, machine: dict = None):
+    if machine is None:
+        return rpc_client.call("spawn_cc_new",
+                               {"cwd": cwd, "prompt": prompt,
+                                "spawn_token": spawn_token})
+    return rpc_client.call_remote(machine, "spawn_cc_new",
+                                  {"cwd": cwd, "prompt": prompt,
+                                   "spawn_token": spawn_token})
+
+
+def _worker_handle(session_id: str, spawn_token: str, cwd: str,
+                   machine: dict = None) -> dict:
+    machine_id = (machine or {}).get("id")
+    if not machine_id:
+        machine_id = machine_identity.load_or_create().get("id")
+    return {"session_id": session_id, "machine_id": machine_id, "cwd": cwd,
+            "spawn_token": spawn_token, "connection_status": "registered"}
+
+
+def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
+                       machine: dict = None, hold_time: int = 300) -> dict:
+    """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it
+    to register, and return a structured WorkerHandle - NO auto-connect (the
+    caller decides when to call connect). spawn_token: caller-supplied (or
+    server-generated, returned in the handle); a retry with the SAME token
+    returns the original handle instead of spawning again. HP-04."""
+    token = spawn_token or uuid.uuid4().hex
+    # same-token retry: already registered -> original handle
+    try:
+        sid = _find_session_by_token(token, machine)
+    except KernelError as e:
+        return _kernel_err(e)
+    if sid:
+        return _ok(_worker_handle(sid, token, cwd, machine))
+    # in-flight (pending marker) -> don't re-spawn
+    try:
+        pending = _has_pending_spawn(token, machine)
+    except KernelError as e:
+        return _kernel_err(e)
+    if pending is None:
+        return _remote_err()
+    if not pending:
+        try:
+            r = _spawn_new(cwd, _spawn_prompt(token), token, machine)
+        except KernelError as e:
+            return _kernel_err(e)
+        if r is None:
+            return _remote_err()
+    # poll for registration (token -> sid; plan A hook event or plan B claim)
     deadline = time.time() + 30
-    new_sid = None
+    sid = None
     while time.time() < deadline:
         time.sleep(1)
-        new_sid = find()
-        if new_sid:
+        try:
+            sid = _find_session_by_token(token, machine)
+        except KernelError:
+            sid = None
+        if sid:
             break
-    if not new_sid:
-        return "failed, new session did not register within 30s (is the plugin installed for new CCs?)"
-    return connect(caller_sid, new_sid, hold_time)
+    if not sid:
+        return _err(Code.TIMEOUT,
+                    "new session did not register within 30s (is the plugin "
+                    "installed for new CCs?)", retryable=True)
+    return _ok(_worker_handle(sid, token, cwd, machine))
+
+
+def claim_pending_spawn(spawn_token: str, session_id: str) -> dict:
+    """Plan B (D8): a spawned worker claims its token on first tool use so
+    spawn_collaborator's registration poll can resolve. Idempotent."""
+    try:
+        r = rpc_client.call("claim_pending_spawn",
+                            {"token": spawn_token, "session_id": session_id})
+    except KernelError as e:
+        return _kernel_err(e)
+    if r and r.get("claimed"):
+        return _ok({"claimed": True, "session_id": r.get("session_id")})
+    return _err(Code.NOT_FOUND, (r or {}).get("reason", "no pending spawn for token"))
+
+
+# The legacy spawn prompt below is kept EXACTLY as today (per the brief), so
+# workers spawned via the legacy path keep replying WITHOUT correlation_id and
+# keep exercising connect's D9 legacy fallback. spawn_collaborator (the new
+# path) uses _spawn_prompt above, whose correlation_id instruction makes the
+# worker reply selectable by HP-05.
+_LEGACY_SPAWN_PROMPT = ("You are a new collaborator spawned by cc-communicate. "
+                        "First call my_session_id to learn your id. Then call listen "
+                        "(your_id, acked_ts, timeout) - it blocks and returns "
+                        "{messages, watermark}. Pass 0 as acked_ts the FIRST time; on "
+                        "every later listen pass the watermark the previous listen "
+                        "returned (this lets the kernel archive only what you've "
+                        "confirmed - never drop or duplicate it). When a peer sends you "
+                        "a hello, reply with send_message(your_id, peer_id, <message>) "
+                        "- do NOT call connect to reply. KEEP LISTENING: after each "
+                        "listen returns, process any messages and call listen again "
+                        "(with the latest watermark), in a loop, until you call "
+                        "close_connection(your_id, peer_id, your_latest_watermark) to "
+                        "end the conversation. If you ever lose your watermark (compact / "
+                        "long gap), call query_my_ACK_timestamp(your_id) to recover it. "
+                        "Never invoke listen.py directly, never write a shell loop, never "
+                        "nohup a listener - only use the listen tool.")
+
+
+def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
+                        machine=None) -> str:
+    """LEGACY wrapper (one release, HP-07): spawn + connect, returns the
+    legacy string shape. New code should use spawn_collaborator (structured
+    WorkerHandle) + connect. The spawn prompt stays the OLD text so its
+    correlation_id-less replies exercise connect's legacy fallback (D9)."""
+    hold_time = max(hold_time, _MIN_HOLD_TIME)
+    res = spawn_collaborator(caller_sid, cwd, spawn_token=None,
+                             machine=machine, hold_time=hold_time)
+    if not res["ok"]:
+        return "failed, " + str(res.get("message"))
+    handle = res["data"]
+    cr = connect(caller_sid, handle["session_id"], hold_time=hold_time)
+    if cr["ok"]:
+        reply = (cr["data"] or {}).get("reply")
+        return ("connect succeed; reply: " + reply) if reply else "connect succeed"
+    return "connect failed, " + str(cr.get("message"))
 
 
 def query_machines() -> dict:
