@@ -1,11 +1,10 @@
-"""Structured result/error codes (D7; minimal Wave 1 form).
+"""Structured result/error codes + response envelope (D7 / HP-07).
 
-Wave 1 lands the code enum + minimal ok/err constructors so HP-06 validation
-failures carry a stable, machine-checkable code. The full response envelope
-(arrives in Wave 2 / HP-07) will wrap every tool result; until then tools keep
-returning legacy strings/dicts, and validation failures surface as error
-strings prefixed with the code ("INVALID_ARGUMENT: ...") so callers can branch
-on the code prefix WITHOUT parsing natural language.
+The envelope is the MCP API contract: every tool returns
+{ok, code, message, data, retryable} built by ok()/err(). code is None on
+success; retryable=True only for transient failures where the caller should
+retry the same operation. The kernel does NOT use envelopes - it returns raw
+structured dicts and user_functions wraps them.
 """
 from __future__ import annotations
 
@@ -17,12 +16,15 @@ class Code:
     TIMEOUT = "TIMEOUT"
     CONFLICT = "CONFLICT"
     RESOURCE_EXHAUSTED = "RESOURCE_EXHAUSTED"
+    NOT_ALIVE = "NOT_ALIVE"
     INTERNAL = "INTERNAL"
 
 
 def ok(data=None) -> dict:
-    return {"ok": True, "code": None, "data": data}
+    return {"ok": True, "code": None, "message": None,
+            "data": data, "retryable": False}
 
 
-def err(code: str, message: str, data=None) -> dict:
-    return {"ok": False, "code": code, "message": message, "data": data}
+def err(code: str, message: str, data=None, retryable: bool = False) -> dict:
+    return {"ok": False, "code": code, "message": message,
+            "data": data, "retryable": retryable}
