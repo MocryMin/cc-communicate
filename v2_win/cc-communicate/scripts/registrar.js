@@ -85,6 +85,7 @@ function main() {
       cwd: input.cwd || process.cwd(),
       start_time: r.start,        // claude process creation time — for liveness later
       source: input.source || null,
+      spawn_token: process.env.CC_COMMUNICATE_SPAWN_TOKEN || null,
     });
     dbg(`wrote ${path.basename(p)}`);
   } else if (MODE === 'end') {
