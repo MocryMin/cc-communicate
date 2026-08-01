@@ -947,3 +947,9 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Fix (gate-side)**: restart the kernel with a clean env (`env -u CLAUDE_CODE_CHILD_SESSION -u ANTHROPIC_MODEL`) → spawned workers are normal resumable sessions (transcript lands in the project dir; resume works). For production spawns from real user terminals this never applies (their claude isn't a child session); it only bites when CCs spawn CCs.
 - **Method**: live spawn/close/evoke/connect against the real kernel; transcript + registry evidence; worker statusline showed the marker explicitly.
 - **Confidence**: high — resume verified end-to-end after the clean-kernel restart.
+
+### T39 — Wave 2 live gate scope decision: L3 (cross-realm cursors) + L4 (multi-collab stress) not re-run
+
+- **Decision (user-approved)**: L3/L4 from the standing gate were NOT re-run this wave. Rationale: the wave's live risk areas were exactly the new spawn disambiguation (L5 PASS) and connection correlation (L6 PASS); L4 would re-verify the message path (send/listen unchanged except envelope wraps, unit-tested); L3 would re-verify cross-realm cursor semantics (unchanged) plus the new 3-line routing wrappers (activate/get/deactivate_connection), which mirror the already-live-proven `_register`/`_send` pattern and are unit-tested. Recorded rather than silently skipped.
+- **Wave gate summary**: L1 PASS / L2 PASS (T38) / L5 PASS / L6 PASS (T37) / L3+L4 not re-run (T39). Auto tiers: T0/T1/T2 GATE PASS (117 tests, PARITY OK 29 files).
+- **Confidence**: high for the run tiers; the skipped tiers carry the documented rationale above.
