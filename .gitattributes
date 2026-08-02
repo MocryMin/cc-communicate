@@ -1,0 +1,5 @@
+# HP-13-A: artifact/parity gates hash raw bytes; v2 trees + templates must
+# stay LF in the working copy even under core.autocrlf=true.
+v2_win/** text eol=lf
+v2_wsl/** text eol=lf
+tools/artifact_templates/** text eol=lf
