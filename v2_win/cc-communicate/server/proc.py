@@ -42,6 +42,19 @@ def proc_start_time(pid: int) -> float | None:
         return None
 
 
+def pid_matches(pid, recorded):
+    """None=unknown/unset, False=dead, True=alive. The shared liveness rule
+    (was check_alive._match / session_by_pid._pid_live): the pid must exist
+    AND its start time must match the recorded one within 1s (rejects pid
+    reuse)."""
+    if pid is None or recorded is None:
+        return None
+    current = proc_start_time(pid)
+    if current is None:
+        return False
+    return abs(current - float(recorded)) <= 1.0
+
+
 def parse_start_time(s) -> float | None:
     if not s:
         return None

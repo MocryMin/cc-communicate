@@ -26,7 +26,7 @@ import shutil
 import time
 
 from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE, PENDING_SPAWN_DIR
-from proc import proc_start_time
+import proc
 import conversations
 import fileutil
 import message_record
@@ -54,29 +54,20 @@ def check_alive(alive_sessions: dict, session_id: str) -> int:
     if not info:
         return 0
 
-    def _match(pid, recorded):
-        """None=unknown/unset, False=dead, True=alive."""
-        if pid is None or recorded is None:
-            return None
-        current = proc_start_time(pid)
-        if current is None:
-            return False
-        return abs(current - float(recorded)) <= 1.0
-
     known = info.get("known_pids")
     if known:
         # newest-first: the primary (last write) is checked first - the hot
         # path stays O(1) when it is alive; a dead last-write is pruned BEFORE
         # an older live pid can match and return (T30).
         for pid, recorded in list(known.items())[::-1]:
-            m = _match(pid, recorded)
+            m = proc.pid_matches(pid, recorded)
             if m is True:
                 info["pid"], info["start_time"] = pid, recorded
                 return 1
             if m is False:
                 known.pop(pid, None)  # dead - don't re-check next time
     else:
-        m = _match(info.get("pid"), info.get("start_time"))
+        m = proc.pid_matches(info.get("pid"), info.get("start_time"))
         if m is True:
             return 1
         if m is False:
@@ -544,18 +535,6 @@ def kernel_terminate() -> dict:
 
 # ---------- session discovery ----------
 
-def _pid_live(pid, recorded):
-    """None=unknown/unset, False=dead, True=alive. Same liveness rule as
-    check_alive's _match: the pid must exist AND its start time must match the
-    recorded one within 1s (rejects pid reuse)."""
-    if pid is None or recorded is None:
-        return None
-    current = proc_start_time(pid)
-    if current is None:
-        return False
-    return abs(current - float(recorded)) <= 1.0
-
-
 def session_by_pid(sessions: dict, alive_sessions: dict, pid: int):
     """Primary lookup walks sessions (last-write pid). T35: a boot can fire
     SessionStart twice (T30) and the LAST write clobbers sessions[sid]['pid']
@@ -567,7 +546,7 @@ def session_by_pid(sessions: dict, alive_sessions: dict, pid: int):
             return sid
     for sid, info in (alive_sessions or {}).items():
         known = info.get("known_pids") or {}
-        if pid in known and _pid_live(pid, known[pid]) is True:
+        if pid in known and proc.pid_matches(pid, known[pid]) is True:
             return sid
     return None
 

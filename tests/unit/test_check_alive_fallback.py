@@ -20,7 +20,7 @@ def test_fallback_to_known_good_pid(server, monkeypatch):
     must NOT be fooled by the last event - it falls back to the good pid."""
     ka = server.kernel_api
     fake = {111: 1000.0, 222: None}  # 111 alive, 222 dead
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
     _alive_entry(server, monkeypatch, 111, 1000.0)
     _alive_entry(server, monkeypatch, 222, 2000.0)
     alive = server.kernel.alive_sessions
@@ -35,7 +35,7 @@ def test_dead_pid_first_then_good(server, monkeypatch):
     keep working."""
     ka = server.kernel_api
     fake = {111: 1000.0, 222: None}
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
     _alive_entry(server, monkeypatch, 222, 2000.0)
     _alive_entry(server, monkeypatch, 111, 1000.0)
     alive = server.kernel.alive_sessions
@@ -46,7 +46,7 @@ def test_all_pids_dead_returns_0_and_pops(server, monkeypatch):
     """Genuinely dead session: no candidate matches -> 0 and the entry is
     popped (evoke is then the correct recovery)."""
     ka = server.kernel_api
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: None)
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: None)
     _alive_entry(server, monkeypatch, 111, 1000.0)
     _alive_entry(server, monkeypatch, 222, 2000.0)
     alive = server.kernel.alive_sessions
@@ -59,7 +59,7 @@ def test_start_time_mismatch_rejected(server, monkeypatch):
     as a different process (pid reuse) - never promoted."""
     ka = server.kernel_api
     fake = {111: 9999.0}  # alive, but a DIFFERENT incarnation
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
     _alive_entry(server, monkeypatch, 111, 1000.0)
     alive = server.kernel.alive_sessions
     assert ka.check_alive(alive, "sess-t30") == 0
@@ -86,7 +86,7 @@ def test_session_by_pid_falls_back_to_known_pids(server, monkeypatch):
     via the known_pids fallback (T35 - the my_session_id hole)."""
     ka = server.kernel_api
     fake = {111: 1000.0, 222: None}  # 111 alive, 222 dead
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
     _alive_entry(server, monkeypatch, 111, 1000.0)
     _alive_entry(server, monkeypatch, 222, 2000.0)  # last write = dead 222 (primary)
     assert ka.session_by_pid(server.kernel.sessions,
@@ -97,7 +97,7 @@ def test_session_by_pid_falls_back_to_known_pids(server, monkeypatch):
 
 def test_session_by_pid_unknown_pid_none(server, monkeypatch):
     ka = server.kernel_api
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: None)
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: None)
     _alive_entry(server, monkeypatch, 111, 1000.0)
     assert ka.session_by_pid(server.kernel.sessions,
                              server.kernel.alive_sessions, 999999) is None
@@ -106,7 +106,7 @@ def test_session_by_pid_unknown_pid_none(server, monkeypatch):
 def test_session_by_pid_primary_unchanged(server, monkeypatch):
     """No known_pids (pre-T30 style entry) -> primary scan only, same as before."""
     ka = server.kernel_api
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: 1000.0)
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: 1000.0)
     k = server.kernel
     ev = {"event": "start", "event_ts": 1000000, "session_id": "sess-t30",
           "pid": 111, "cwd": "/tmp/x", "start_time": "unused",
@@ -122,7 +122,7 @@ def test_session_by_pid_never_resolves_other_sid(server, monkeypatch):
     """A known pid of sid A never resolves to sid B (the T35 invariant)."""
     ka = server.kernel_api
     fake = {111: 1000.0, 333: 3000.0}
-    monkeypatch.setattr(ka, "proc_start_time", lambda pid: fake.get(pid))
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
     k = server.kernel
     monkeypatch.setattr(k, "parse_start_time", lambda _s: 0.0)
     ev_a = {"event": "start", "event_ts": 1, "session_id": "sess-a",
