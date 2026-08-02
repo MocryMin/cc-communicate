@@ -42,6 +42,19 @@ def _detached_popen(cmd_args, cwd=None, env=None):
     )
 
 
+def _child_env(spawn_token: str = None) -> dict:
+    """Sanitized child env for spawned CCs (T38 / HP-08): CC-internal
+    CLAUDE_CODE_CHILD_SESSION must not leak into children (it turns
+    transcript saving off -> non-resumable sessions). Whitelist-extensible -
+    only add vars with concrete evidence. HP-04 spawn_token (plan A) is
+    injected here."""
+    env = dict(os.environ)
+    env.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    if spawn_token:
+        env["CC_COMMUNICATE_SPAWN_TOKEN"] = spawn_token
+    return env
+
+
 def _claude_bin() -> str:
     """The claude binary to invoke. Windows: 'claude' (on PATH). Linux: the full
     path from machine_identity (or fall back to 'claude' if undetected)."""
@@ -67,9 +80,12 @@ def _tmux_spawn(cwd: str, claude_argv: list, env_token: str = None):
     cmd = ["tmux", "new-session", "-d", "-s", session_name]
     if cwd:
         cmd += ["-c", cwd]
+    # T38: strip CC-internal CLAUDE_CODE_CHILD_SESSION from the session env
+    # (it turns transcript saving off -> non-resumable workers)
+    env_args = ["env", "-u", "CLAUDE_CODE_CHILD_SESSION"]
     if env_token:
-        cmd += ["env", "CC_COMMUNICATE_SPAWN_TOKEN=" + env_token]
-    cmd += claude_argv
+        env_args.append("CC_COMMUNICATE_SPAWN_TOKEN=" + env_token)
+    cmd += env_args + claude_argv
     subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -87,12 +103,9 @@ def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None):
     (HP-04) is injected into the child environment so the SessionStart hook
     can bind the session to its spawn request (plan A, D8)."""
     if os.name == "nt":
-        env = None
-        if spawn_token:
-            env = {**os.environ, "CC_COMMUNICATE_SPAWN_TOKEN": spawn_token}
         _detached_popen(["cmd", "/c", "start", "claude",
                          "--dangerously-skip-permissions", prompt],
-                        cwd=cwd, env=env)
+                        cwd=cwd, env=_child_env(spawn_token))
     else:
         _tmux_spawn(cwd, [_claude_bin(), "--dangerously-skip-permissions", prompt],
                     env_token=spawn_token)
@@ -109,7 +122,8 @@ def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None):
     explicitly (Popen on Windows, -c on tmux)."""
     if os.name == "nt":
         _detached_popen(["cmd", "/c", "start", "claude", "--resume", session_id,
-                         "--dangerously-skip-permissions", prompt], cwd=cwd)
+                         "--dangerously-skip-permissions", prompt],
+                        cwd=cwd, env=_child_env())
     else:
         _tmux_spawn(cwd or "", [_claude_bin(), "--resume", session_id,
                                 "--dangerously-skip-permissions", prompt])
