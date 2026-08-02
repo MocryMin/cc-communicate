@@ -55,11 +55,17 @@ def build_wsl_tree(win_root: Path, dst: Path) -> None:
 
 
 def generate() -> int:
+    win_rels = set(collect(WIN))
+    if not win_rels:
+        # Vacuous guard: an empty/missing source tree must never trigger the
+        # destructive stale-removal loop (mirrors check_parity's guard).
+        print("GENERATE FAIL: no files in v2_win/cc-communicate - "
+              "refusing to touch v2_wsl")
+        return 1
     build_wsl_tree(WIN, WSL)
     # Mirror semantics: files present in v2_wsl but absent from v2_win are
     # stale (deletions must propagate). .mcp.json is always in win, so a
     # stale removal implies a real deletion.
-    win_rels = set(collect(WIN))
     for rel in collect(WSL):
         if rel not in win_rels:
             (WSL / rel).unlink()

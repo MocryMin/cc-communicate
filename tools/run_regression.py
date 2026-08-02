@@ -212,7 +212,7 @@ def main(argv=None) -> int:
         description="cc-communicate wave-exit regression gate "
                     "(spec: docs/superpowers/specs/2026-07-31-wave1-regression-gate-design.md)")
     parser.add_argument("--tier", choices=("auto", "live", "all"), default="auto",
-                        help="auto: scripted tiers T0-T2; live: print L1-L4 "
+                        help="auto: scripted tiers T0-T2; live: print L1-L7 "
                              "checklists only; all: both")
     args = parser.parse_args(argv)
     if args.tier == "live":

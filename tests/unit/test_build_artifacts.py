@@ -134,3 +134,23 @@ def test_verify_vacuous_guard(tmp_path, monkeypatch, capsys):
     (win / ".mcp.json").unlink()                            # win content now empty
     assert ba.main(["verify"]) == 1
     assert "0 files compared" in capsys.readouterr().out
+
+
+def test_generate_vacuous_guard(tmp_path, monkeypatch, capsys):
+    """An empty/missing v2_win must never trigger the destructive
+    stale-removal loop (final-review finding)."""
+    ba = _import()
+    win, wsl = tmp_path / "win", tmp_path / "wsl"
+    win.mkdir()
+    wsl.mkdir()
+    (wsl / "precious.py").write_text("keep me")
+    tpl = tmp_path / "templates"
+    tpl.mkdir()
+    (tpl / "mcp.win.json").write_text('{"win": true}\n')
+    (tpl / "mcp.wsl.json").write_text('{"wsl": true}\n')
+    monkeypatch.setattr(ba, "WIN", win, raising=False)
+    monkeypatch.setattr(ba, "WSL", wsl, raising=False)
+    monkeypatch.setattr(ba, "TEMPLATE_DIR", tpl, raising=False)
+    assert ba.main(["generate"]) == 1
+    assert (wsl / "precious.py").read_text() == "keep me"
+    assert "GENERATE FAIL" in capsys.readouterr().out
