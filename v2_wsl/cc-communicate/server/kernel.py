@@ -399,6 +399,7 @@ _ARG_VALIDATORS = {
     "deactivate_connection": {},
     "get_connection_info": {},
     "run_gc": {"dry_run": validation.validate_bool},
+    "backlog_stats": {"session_id": validation.validate_session_id},
     "listen_scan_v2": {"sid": validation.validate_session_id},
     "query_cursors": {"sid": validation.validate_session_id},
     "upload_cursor": {"sid": validation.validate_session_id},
@@ -475,6 +476,8 @@ def _dispatch(function: str, args: dict):
         return kernel_api.kernel_terminate()
     if function == "run_gc":
         return kernel_api.run_gc(args.get("dry_run", False))
+    if function == "backlog_stats":
+        return kernel_api.backlog_stats(args["session_id"])
     # arm_poller dispatch REMOVED (v2.2 Amd3)
     raise ValueError(f"unknown kernel function: {function}")
 

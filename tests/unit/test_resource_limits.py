@@ -85,3 +85,42 @@ def test_user_functions_not_registered_still_not_found(server, monkeypatch):
     r = user_functions.send_message("a", "b", "hi")
     assert r["ok"] is False and r["code"] == Code.NOT_FOUND
     assert r["retryable"] is False
+
+
+# ---------- HP-09: backlog_stats (kernel-function observability) ----------
+
+def test_backlog_stats_counts_per_partner(server):
+    ka = server.kernel_api
+    server.paths.ensure_runtime_dirs()
+    k = server.kernel
+    k.alive_conversations[("a", "b")] = {"established_at": 1.0}
+    k.alive_conversations[("a", "c")] = {"established_at": 1.0}
+    ka.send_message(k.alive_conversations, {}, "store", "b", "a", "to-a-1")
+    ka.send_message(k.alive_conversations, {}, "store", "b", "a", "to-a-2")
+    ka.send_message(k.alive_conversations, {}, "store", "c", "a", "to-a-3")
+    ka.send_message(k.alive_conversations, {}, "store", "a", "b", "to-b-1")
+    stats = ka.backlog_stats("a")
+    assert stats["b"]["unacked"] == 2      # to-a-1, to-a-2 (to-a-3 is from c)
+    assert stats["c"]["unacked"] == 1
+    assert stats["b"]["bytes"] > 0
+    assert ka.backlog_stats("zzz") == {}
+
+
+def test_backlog_stats_direction_only(server):
+    """Only messages ADDRESSED to sid count - sid's own outgoing messages do
+    not inflate its backlog."""
+    ka = server.kernel_api
+    server.paths.ensure_runtime_dirs()
+    k = server.kernel
+    k.alive_conversations[("a", "b")] = {"established_at": 1.0}
+    ka.send_message(k.alive_conversations, {}, "store", "a", "b", "from-a")
+    assert ka.backlog_stats("a")["b"]["unacked"] == 0
+    assert ka.backlog_stats("b")["a"]["unacked"] == 1
+
+
+def test_dispatch_routes_backlog_stats(server):
+    k = server.kernel
+    res = k._dispatch("backlog_stats", {"session_id": "a"})
+    assert isinstance(res, dict)
+    with pytest.raises(server.validation.InvalidArgumentError):
+        k._dispatch("backlog_stats", {"session_id": "../evil"})

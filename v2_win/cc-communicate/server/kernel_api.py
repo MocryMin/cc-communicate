@@ -570,6 +570,43 @@ def run_gc(dry_run: bool = False) -> dict:
     return cleanup.run_gc(dry_run=bool(dry_run))
 
 
+def backlog_stats(session_id: str) -> dict:
+    """HP-09: per-partner unacked backlog addressed TO sid (pipe files, both
+    formats) + bytes. Read-only; kernel function ONLY (HP-12 surfaces
+    observability as a tool)."""
+    validation.validate_session_id(session_id)
+    result = {}
+    try:
+        entries = os.listdir(CONVERSATIONS_DIR)
+    except FileNotFoundError:
+        return result
+    for name in entries:
+        parts = name.split(conversations.SEP)
+        if len(parts) != 2 or session_id not in parts:
+            continue
+        partner = parts[1] if parts[0] == session_id else parts[0]
+        pipe = os.path.join(CONVERSATIONS_DIR, name, "pipe")
+        if not os.path.isdir(pipe):
+            continue
+        unacked = 0
+        total_bytes = 0
+        try:
+            fnames = os.listdir(pipe)
+        except OSError:
+            fnames = []
+        for fname in fnames:
+            info = conversations.parse_any_pipe_filename(fname)
+            if not info or info["to_id"] != session_id:
+                continue
+            unacked += 1
+            try:
+                total_bytes += os.path.getsize(os.path.join(pipe, fname))
+            except OSError:
+                pass
+        result[partner] = {"unacked": unacked, "bytes": total_bytes}
+    return result
+
+
 # ---------- session discovery ----------
 
 def session_by_pid(sessions: dict, alive_sessions: dict, pid: int):
