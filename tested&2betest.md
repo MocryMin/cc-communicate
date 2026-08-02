@@ -1027,3 +1027,47 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   incl. the mandated L3/L4) run NEXT at the Wave 3 exit gate per the user's
   locked decision.
 - **Confidence**: high for unit semantics + CLI behavior; live gate pending.
+
+### T45 — Wave 3 exit live gates L1/L2/L4/L5/L6 (full re-run per user decision; L3 blocked-environment)
+
+- **Method**: script-import coordinator (`livegate-coordinator`, real data root) + real spawned CC windows on the
+  user's desktop. Fresh kernel restarted with clean env (new Wave-3 code confirmed live: kernel log shows the HP-08
+  start-GC deleting 128 stale session_ctrl events + 3 orphaned responses, violations=[] — live GC evidence).
+  - **L1 spawn-race PASS**: spawn → exactly one registered worker per token (`bb105bac`, `f99fe4f6`, `9f5e3f76`,
+    `0e204031`); same-token retry returns the SAME handle without re-spawn; check_alive=1; token map binds; the new
+    WorkerHandle carries `permission_mode` (HP-10 live evidence).
+  - **L2 reconnect PASS-with-finding**: dead (check_alive=0) → evoke → alive in 2s, resume lands in the original cwd
+    (T25), and the saved transcript proves the T38 fix live (workers are resumable). Delivery AFTER resume FAILED
+    twice (2/2): the resumed CC's cc-communicate MCP client comes up DISCONNECTED (see T46) → the worker cannot
+    listen/ack → the delivery message stays in the pipe. Delivery path itself re-verified via fresh spawns (L4:
+    10/10 acked).
+  - **L4 multi-collab stress PASS**: 2 workers × 5 tagged messages = 10 sent, 10/10 acked (archived exactly once,
+    zero loss/dup); one worker replied 5/5 with message_id echoes (collected via coordinator listen_v2, 5/5 matched);
+    the other acked without replying (autonomy variance, not loss).
+  - **L5 same-cwd spawns PASS**: 2 workers in the SAME cwd with distinct tokens → distinct sids, no session bleed,
+    both alive.
+  - **L6 correlated connect PASS**: connect with connection_id → correlation-matched reply from the worker; a second
+    id → CONFLICT with current_connection_id in data; same-id retry → reused=True; close → info.json status=closed
+    + closed_at_ms.
+  - **L3 cross-realm NOT RUN**: needs the WSL side (v2_wsl deployment + WSL CC + handshake) — environment not set up
+    this session. Recorded as blocked-environment, to run in a follow-up (it is the one gate the kimi-k3 mandate
+    explicitly required).
+- **Result**: L1/L4/L5/L6 PASS; L2 PASS-with-finding (T46); L3 blocked-environment. Auto gate GATE PASS (193 tests,
+  parity OK 32 files) was re-run before the live session.
+- **Confidence**: high for the run gates; L3 explicitly pending.
+
+### T46 — Finding: resumed CC's cc-communicate MCP client disconnected (CC v2.1.220 resume quirk)
+
+- **Symptom**: after evoke→`claude --resume`, the revived worker's window reports "cc-communicate MCP server
+  currently disconnected (tools unavailable)" — 2/2 resumes (f99fe4f6, 9f5e3f76). The delivery message sent to the
+  revived worker is never acked (stays in pipe). Both resumed windows also showed a stray `❯ bypass` user line in
+  the restored transcript that neither the user nor any cc-communicate code typed.
+- **Evidence it is CC-side, not a cc-communicate regression**: the revived CC spawns its MCP server normally
+  (python mcp_server.py, repo code, child of the revived CC, healthy 0% CPU); the worker's LAST tool call before the
+  close succeeded (close_connection → {closed: true}); no error in cc-communicate code or kernel.log; original (non-
+  resumed) workers listen/ack fine (L4 10/10); Wave-2 L2 passed the same flow, so the failure is intermittent.
+  Hypothesis: during the transcript restore ("Cooked/Baked for 51-112s") the CC's MCP client times out the idle
+  blocking-listen server and marks it disconnected; the `bypass` line is a CC permission auto-response artifact.
+- **Action**: documented; re-test delivery-after-resume on a CC update or after investigating CC's resume↔MCP
+  handshake. cc-communicate code untouched (no fix warranted without a reproducible cc-communicate-side cause).
+- **Confidence**: high for the environment attribution; the exact CC-internal mechanism unverified.
