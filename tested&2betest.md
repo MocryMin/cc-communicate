@@ -1088,3 +1088,22 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   zero loss/dup. Auto gate GATE PASS (193 tests, parity OK 32 files) unchanged.
 - **Confidence**: high - real WSL CC, real cross-machine RPC (call_remote + routed store), per-kernel cursor
   state verified on both sides.
+
+### T48 — Wave 3 external audit (kimi-k3) PASS
+
+- **Method**: review package `docs/superpowers/reviews/2026-08-03-wave3-review-brief.md` sent to kimi-k3 after
+  the full L1-L6 live re-run was pushed (b8b828a). Reviewer re-ran the verification themselves (full suite
+  193/193, parity 32 files, GATE PASS, 72/72 Wave-3 new tests, dispatch routes, conftest reload list).
+- **Result**: PASS — all four proposals (HP-08 kernel lifecycle + safe GC, HP-09 resource limits + artifact_refs +
+  backpressure, HP-10 permission default flip, HP-11 wrap-migration) implemented correctly. No blocking issues,
+  no fix-before-merge items. Highlights cited: structural GC whitelist, wrap-migration design correction (D2-a),
+  additive-key artifact_refs, retryable backpressure semantics, honest T46 attribution.
+- **Dispositions of the 4 minor notes (all accepted as recorded, none requires code)**:
+  1. T46 re-test after a CC update — already standing (T46 action).
+  2. known_pids bound-trim TypeError on None start_time — already recorded as a deferred minor (Wave-1 legacy);
+     unchanged.
+  3. cc-communicate-marketplace/ tree sync (Wave 1-3 fixes) — already standing release item; unchanged.
+  4. Backpressure is a count cap, not a byte cap — already recorded as by-design deviation; unchanged.
+- **Next**: Wave 4 (HP-13-A canonical single source + generated win/wsl artifacts) — the reviewer confirms it is
+  the last wave and that the protocol is stable enough (193 tests + 6 live gates) to absorb its HIGH risk.
+- **Confidence**: high for the audit outcome; dispositions are the reviewer's words mapped onto existing records.
