@@ -30,6 +30,7 @@ import kernel_api
 import fileutil
 import machine_identity
 import operation_journal as operation_journal_mod
+import schema
 import validation
 from paths import (
     CONVERSATIONS_DIR, CORE_STATUS_FILE, SERVER_DATA_DIR, TERMINATE_FLAG,
@@ -87,22 +88,36 @@ def _write_core_status(status: int):
 
 def _load_sessions():
     data = _read_json(SESSIONS_FILE)
+    if schema.schema_too_new(data):
+        log.warning("sessions.json schema_version %s > supported %s - "
+                    "skipping (file untouched)", data.get("schema_version"),
+                    schema.SUPPORTED_SCHEMA)
+        return
+    data = schema.unwrap(data, "sessions")
     if isinstance(data, dict):
         sessions.update(data)
         log.info("loaded sessions.json: %d sessions", len(sessions))
 
 
 def _save_sessions():
-    _atomic_write_json(SESSIONS_FILE, sessions)
+    _atomic_write_json(SESSIONS_FILE,
+                       {"schema_version": 1, "sessions": sessions})
 
 
 def _load_alive_convs():
     """Reload registered conversations from disk (R2). alive_conversations is
     otherwise in-memory and would be lost on every kernel restart (crash / idle
-    exit / terminate), breaking all in-flight send_message calls. Persisted as a
-    list of [a, b, info] (tuple keys aren't JSON-serializable); the pair is
-    already canonical (sorted) when stored."""
+    exit / terminate), breaking all in-flight send_message calls. Persisted as
+    {schema_version: 1, conversations: [[a, b, info], ...]} (legacy bare list
+    still read - HP-11 dual-read); the pair is already canonical (sorted) when
+    stored."""
     data = _read_json(ALIVE_CONVS_FILE)
+    if schema.schema_too_new(data):
+        log.warning("alive_conversations.json schema_version %s > supported "
+                    "%s - skipping (file untouched)", data.get("schema_version"),
+                    schema.SUPPORTED_SCHEMA)
+        return
+    data = schema.unwrap(data, "conversations")
     if not isinstance(data, list):
         return
     for entry in data:
@@ -115,16 +130,25 @@ def _load_alive_convs():
 
 def _save_alive_convs():
     data = [[a, b, info] for (a, b), info in alive_conversations.items()]
-    _atomic_write_json(ALIVE_CONVS_FILE, data)
+    _atomic_write_json(ALIVE_CONVS_FILE,
+                       {"schema_version": 1, "conversations": data})
 
 
 def _load_ack_timestamps():
     """Reload per-sid ACK watermarks from disk (T24). acked_timestamps is
     otherwise in-memory; listen_scan updates it in memory (frequent, no I/O) and
-    upload_ack_timestamp persists immediately (on close). This load catches the
-    case where the kernel restarts mid-conversation - the CC can recover its ts
-    via query_my_ACK_timestamp. Persisted as a flat {sid: ts} dict."""
+    upload_ack_timestamp persists immediately (on close). Persisted as
+    {schema_version: 1, ack_timestamps: {sid: ts}} (legacy flat dict still
+    read - HP-11 dual-read). This load catches the case where the kernel
+    restarts mid-conversation - the CC can recover its ts via
+    query_my_ACK_timestamp."""
     data = _read_json(ACK_TIMESTAMPS_FILE)
+    if schema.schema_too_new(data):
+        log.warning("ack_timestamps.json schema_version %s > supported %s - "
+                    "skipping (file untouched)", data.get("schema_version"),
+                    schema.SUPPORTED_SCHEMA)
+        return
+    data = schema.unwrap(data, "ack_timestamps")
     if isinstance(data, dict):
         for sid, ts in data.items():
             if isinstance(ts, (int, float)):
@@ -133,7 +157,8 @@ def _load_ack_timestamps():
 
 
 def _save_ack_timestamps():
-    _atomic_write_json(ACK_TIMESTAMPS_FILE, acked_timestamps)
+    _atomic_write_json(ACK_TIMESTAMPS_FILE,
+                       {"schema_version": 1, "ack_timestamps": acked_timestamps})
 
 
 def _load_message_sequence():
@@ -142,6 +167,11 @@ def _load_message_sequence():
     counter NEVER causes sequence reuse."""
     import conversations as _conv
     data = _read_json(MESSAGE_SEQUENCE_FILE)
+    if schema.schema_too_new(data):
+        log.warning("message_sequence.json schema_version %s > supported %s - "
+                    "skipping (file untouched; sequence heals from files)",
+                    data.get("schema_version"), schema.SUPPORTED_SCHEMA)
+        data = None
     state = {"schema_version": 1, "store_id": _local_store_id, "last_allocated": 0}
     if isinstance(data, dict) and isinstance(data.get("last_allocated"), (int, float)):
         state["last_allocated"] = max(0, int(data["last_allocated"]))
@@ -177,6 +207,11 @@ def _load_cursors():
     cursor state is NEVER converted from legacy ack_timestamps (explicit
     migration point)."""
     data = _read_json(CURSORS_FILE)
+    if schema.schema_too_new(data):
+        log.warning("cursors.json schema_version %s > supported %s - "
+                    "skipping (file untouched)", data.get("schema_version"),
+                    schema.SUPPORTED_SCHEMA)
+        return
     if not isinstance(data, dict):
         return
     sessions_data = data.get("sessions")
@@ -197,8 +232,15 @@ def _save_cursors():
 
 
 def _load_operation_journal():
+    data = _read_json(OPERATION_JOURNAL_FILE)
+    if schema.schema_too_new(data):
+        log.warning("operation_journal.json schema_version %s > supported %s - "
+                    "skipping (file untouched)", data.get("schema_version"),
+                    schema.SUPPORTED_SCHEMA)
+        data = None
     operation_journal.clear()
-    operation_journal.update(operation_journal_mod.load(OPERATION_JOURNAL_FILE))
+    if data is not None:
+        operation_journal.update(operation_journal_mod.load(OPERATION_JOURNAL_FILE, data))
     log.info("loaded operation journal: %d entries", len(operation_journal))
 
 

@@ -29,13 +29,16 @@ TTL_MS = 24 * 3600 * 1000
 MAX_ENTRIES = 1000
 
 
-def load(path: str) -> dict:
-    """-> {operation_id: entry}. Tolerant: any read problem -> empty journal."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
+def load(path: str, data=None) -> dict:
+    """-> {operation_id: entry}. Tolerant: any read problem -> empty journal.
+    `data` may be passed pre-read (the kernel applies the HP-11 schema guard
+    before calling); None -> read the file."""
+    if data is None:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
     if isinstance(data, dict) and isinstance(data.get("operations"), dict):
         return data["operations"]
     return {}

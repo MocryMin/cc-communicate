@@ -490,7 +490,8 @@ def upload_ack_timestamp(acked_timestamps: dict, sid: str, ts: int) -> int:
     if ts and ts > acked_timestamps.get(sid, 0):
         acked_timestamps[sid] = ts
     try:
-        _atomic_write_json(ACK_TIMESTAMPS_FILE, acked_timestamps)
+        _atomic_write_json(ACK_TIMESTAMPS_FILE,
+                           {"schema_version": 1, "ack_timestamps": acked_timestamps})
     except OSError:
         pass
     return acked_timestamps.get(sid, 0)
