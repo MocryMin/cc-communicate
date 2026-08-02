@@ -13,8 +13,9 @@ v2 changes vs v0.1:
     create_conversation_folder, kernel_terminate. arm_poller dispatch REMOVED.
 
 Lifecycle (core_plan #11): INIT (load sessions, replay event log, signal READY)
--> LOOP (backoff 1ms..1s; replay events, drain queue) -> EXIT (alive_conversations
-empty AND idle_timeout AND queue empty; or SIGINT/SIGTERM; or kernel_terminate).
+-> LOOP (backoff 1ms..1s; replay events, drain queue) -> EXIT (idle_timeout AND
+queue empty - registration is NOT a lease (D10); or SIGINT/SIGTERM; or
+kernel_terminate).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import os
 import signal
 import time
 
+import cleanup
 import kernel_api
 import fileutil
 import machine_identity
@@ -58,6 +60,7 @@ _local_store_id: str = "unknown"
 _last_activity: float = 0.0
 
 _exit_requested = False
+_last_gc_check: float = 0.0  # HP-08: wall-clock anchor for the daily GC due-check
 log = logging.getLogger("cc-communicate.kernel")
 _local_machine_type: str = "unknown"
 
@@ -394,6 +397,7 @@ _ARG_VALIDATORS = {
     "activate_connection": {"connection_id": validation.validate_connection_id},
     "deactivate_connection": {},
     "get_connection_info": {},
+    "run_gc": {"dry_run": validation.validate_bool},
     "listen_scan_v2": {"sid": validation.validate_session_id},
     "query_cursors": {"sid": validation.validate_session_id},
     "upload_cursor": {"sid": validation.validate_session_id},
@@ -468,6 +472,8 @@ def _dispatch(function: str, args: dict):
         return kernel_api.create_conversation_folder(args["id1"], args["id2"])
     if function == "kernel_terminate":
         return kernel_api.kernel_terminate()
+    if function == "run_gc":
+        return kernel_api.run_gc(args.get("dry_run", False))
     # arm_poller dispatch REMOVED (v2.2 Amd3)
     raise ValueError(f"unknown kernel function: {function}")
 
@@ -480,17 +486,27 @@ def _queue_has_pending() -> bool:
 
 
 def _should_exit() -> bool:
-    if _exit_requested:
+    """D10: exit looks ONLY at queue/activity/terminate - a registered-but-
+    idle conversation is NOT a process lease. All kernel state is persistent
+    (alive_conversations.json etc.), so a restart reloads it; the exit path
+    saves it (main's finally block)."""
+    if _exit_requested or os.path.exists(TERMINATE_FLAG):
         return True
-    if os.path.exists(TERMINATE_FLAG):
-        return True
-    if alive_conversations:
+    if _queue_has_pending():                    # queue: in-flight request
         return False
-    if time.monotonic() - _last_activity < _IDLE_TIMEOUT:
-        return False
-    if _queue_has_pending():
+    if time.monotonic() - _last_activity < _IDLE_TIMEOUT:  # activity
         return False
     return True
+
+
+def _exit_decision() -> bool:
+    """True = exit now. Guards the exit-vs-request race (R4): a request that
+    landed in the window between _should_exit() and the break restarts the
+    cycle (second queue scan - the optimization; client retry + _wake_remote
+    is the correctness backstop)."""
+    if not _should_exit():
+        return False
+    return not _queue_has_pending()
 
 
 def _setup_logging():
@@ -532,6 +548,11 @@ def main():
     _load_cursors()
     _load_operation_journal()
     process_session_ctrl_event()
+    # HP-08: start-time GC sweep (before READY - no live traffic yet)
+    res = cleanup.maybe_run_gc()
+    if res:
+        log.info("GC at start: %s", res)
+    _last_gc_check = time.time()
     _write_core_status(1)
     log.info("kernel READY - %d sessions known, %d alive", len(sessions), len(alive_sessions))
     _last_activity = time.monotonic()
@@ -553,8 +574,15 @@ def main():
                 if idle >= _IDLE_CYCLES_BEFORE_BACKOFF:
                     sleep = min(sleep * 10, _MAX_SLEEP)
                     idle = 0
-            if _should_exit():
+            if _exit_decision():
                 break
+            # HP-08: daily GC sweep (due-check once per minute of wall time;
+            # cleanup.maybe_run_gc is a no-op between due dates)
+            if time.time() - _last_gc_check >= 60:
+                _last_gc_check = time.time()
+                res = cleanup.maybe_run_gc()
+                if res:
+                    log.info("GC sweep: %s", res)
             time.sleep(sleep)
     except Exception:
         log.exception("kernel crashed")

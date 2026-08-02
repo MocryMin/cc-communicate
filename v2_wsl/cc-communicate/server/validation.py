@@ -120,6 +120,13 @@ def validate_cursors(value) -> dict:
     return out
 
 
+def validate_bool(value) -> bool:
+    if not isinstance(value, bool):
+        raise InvalidArgumentError(
+            f"expected a bool; got {type(value).__name__}")
+    return value
+
+
 def resolve_under(root: str, *parts: str) -> str:
     """Join + realpath; the result MUST stay strictly under root."""
     base = os.path.realpath(root)

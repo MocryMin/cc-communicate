@@ -540,6 +540,13 @@ def kernel_terminate() -> dict:
         return {"terminated": False, "reason": str(e)}
 
 
+def run_gc(dry_run: bool = False) -> dict:
+    """HP-08: invoke the safe-GC sweep. Kernel function ONLY - not an MCP
+    tool (the upper layer never needs it); callable via RPC for tests and
+    live gates."""
+    return cleanup.run_gc(dry_run=bool(dry_run))
+
+
 # ---------- session discovery ----------
 
 def session_by_pid(sessions: dict, alive_sessions: dict, pid: int):

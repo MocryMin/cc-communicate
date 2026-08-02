@@ -186,3 +186,11 @@ def test_spawn_entry_sid_always_validated(server):
     v = server.validation
     for bad in ("../evil", "a__b", ""):
         assert v.validate_spawn_entry(bad, "C:\\whatever", {"id": "wsl-1"}) is not None
+
+
+def test_validate_bool(server):
+    v = server.validation
+    assert v.validate_bool(True) is True
+    assert v.validate_bool(False) is False
+    with pytest.raises(v.InvalidArgumentError):
+        v.validate_bool("yes")
