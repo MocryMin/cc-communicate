@@ -518,7 +518,7 @@ def test_artifact_tier_red_fails_gate(monkeypatch, capsys):
 - [ ] **Step 3: Run the regression-suite tests**
 
 Run: `py -3 -m pytest tests/unit/test_run_regression.py tests/parity tests/unit/test_build_artifacts.py -v`
-Expected: all pass (11 run_regression + 3 parity + 9 build_artifacts = 23).
+Expected: all pass (7 run_regression incl. the new red-tier test + 3 parity + 9 build_artifacts = 19).
 
 - [ ] **Step 4: Commit**
 
@@ -551,12 +551,34 @@ Expected: `GENERATED v2_wsl/cc-communicate (33 files)`; `git diff` empty (genera
 Run: `py -3 tools/run_regression.py`
 Expected: T0 syntax PASS, T1 pytest PASS (193 + 10 new = 203), T2 parity PASS (32), T2 artifacts PASS (33), `GATE: PASS`.
 
-- [ ] **Step 3: Live smoke gate (drive L7) — real CC + WSL peer**
+- [ ] **Step 3: LF pinning (CRLF hazard, Task-2 fix-round finding)**
+
+This repo runs `core.autocrlf=true` with LF blobs: a `git checkout`/restore of a v2_* file writes CRLF to the working copy, which is byte-different from the LF canonical — `verify()`/parity correctly FAIL while `git diff` (eol-normalizing) shows nothing. Pin the byte-fidelity surface to LF so any checkout state is gate-green:
+
+Create `.gitattributes` at the repo root:
+
+```
+# HP-13-A: artifact/parity gates hash raw bytes; v2 trees + templates must
+# stay LF in the working copy even under core.autocrlf=true.
+v2_win/** text eol=lf
+v2_wsl/** text eol=lf
+tools/artifact_templates/** text eol=lf
+```
+
+Then run: `git add --renormalize . && git status --short` — expected: no file changes (blobs and working copies are already LF; renormalize is a no-op). Commit:
+
+```bash
+git add .gitattributes
+git commit -m "build(git): pin v2 trees + artifact templates to LF (CRLF hazard, HP-13-A)
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+- [ ] **Step 4: Live smoke gate (drive L7) — real CC + WSL peer**
 
 Per the L7 checklist: script-import coordinator (synthetic sid, real data root v2_win/cc-communicate/data) → `spawn_collaborator` one worker via the repo v2_win → send 1 message → worker acks → `check_alive` == 1 → `check_alive`(WSL peer 4cefe529) == 1 → one cross-realm probe message → routed reply.
 Expected: send+ack OK; WSL peer alive with a routed reply. Record evidence in T49.
 
-- [ ] **Step 4: Records + docs**
+- [ ] **Step 5: Records + docs**
 
 1. `tested&2betest.md` §1 — append:
 
@@ -572,7 +594,7 @@ Expected: send+ack OK; WSL peer alive with a routed reply. Record evidence in T4
 2. `.superpowers/wave4-recovery.md` §3 — replace the parity-sync bullet with: "Edit `v2_win/` only → `py -3 tools/build_artifacts.py generate` → commit both trees (HP-13-A); forgetting surfaces as red T1/T2."
 3. Memory `hardening-program-status.md` — Wave 4 COMPLETE + status update.
 
-- [ ] **Step 5: Commit + push (user approval), then review package**
+- [ ] **Step 6: Commit + push (user approval), then review package**
 
 ```bash
 git add tested\&2betest.md
