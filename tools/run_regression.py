@@ -125,6 +125,13 @@ def _run(cmd, cwd=REPO):
                           capture_output=True, text=True)
 
 
+def _tool_result(r):
+    """(PASS|RED, last non-empty output line) for a tool subprocess."""
+    if r.returncode:
+        return RED, (r.stdout.strip() or r.stderr.strip()).splitlines()[-1]
+    return PASS, r.stdout.strip().splitlines()[-1]
+
+
 def _check_trees() -> bool:
     """Both v2 trees must exist before any tier runs (vacuous-pass guard)."""
     missing = [str(p) for p in (WIN, WSL) if not p.is_dir()]
@@ -183,18 +190,14 @@ def pytest_run():
 def parity_run():
     """T2: shell out to tools/check_parity.py - it owns the hash logic."""
     r = _run([sys.executable, str(TOOLS / "check_parity.py")])
-    if r.returncode:
-        return RED, (r.stdout.strip() or r.stderr.strip()).splitlines()[-1]
-    return PASS, r.stdout.strip().splitlines()[-1]
+    return _tool_result(r)
 
 
 def artifact_run():
     """T2 second sub-step (HP-13-A): committed artifacts must equal what
     tools/build_artifacts.py generate would produce."""
     r = _run([sys.executable, str(TOOLS / "build_artifacts.py"), "verify"])
-    if r.returncode:
-        return RED, (r.stdout.strip() or r.stderr.strip()).splitlines()[-1]
-    return PASS, r.stdout.strip().splitlines()[-1]
+    return _tool_result(r)
 
 
 def print_live_checklists():
