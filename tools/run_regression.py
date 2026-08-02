@@ -28,7 +28,8 @@ SERVER_REL = "server"
 SCRIPTS_REL = "scripts"
 PASS, RED = "PASS", "RED"
 
-# L1-L4 live-gate checklists (verbatim from the design spec section 4).
+# L1-L6 live-gate checklists (L1-L4 verbatim from the design spec section 4;
+# L5/L6 added for the Wave 3 exit gate - full re-run decision, 2026-08-02).
 # A human drives these; the script only prints them.
 LIVE_CHECKLISTS = [
     ("L1 - Spawn-race re-test (T27 live gate)", """\
@@ -78,6 +79,30 @@ LIVE_CHECKLISTS = [
   Expected: zero loss, zero duplicates, clean end
   Pass:     all rounds complete with 1:1 send/receive
   Record:   T# with round/message counts"""),
+    ("L5 - Same-cwd spawn race (T37 live gate)", """\
+  Why:      Wave 2 (HP-04): multiple collaborators spawned in the SAME cwd must
+            not cross sessions; Wave 3 (HP-08) touches spawn env + kernel exit,
+            so the spawn path is re-verified live
+  Prereq:   fresh kernel (no stray CCs), a single cwd P
+  Steps:    spawn 2+ collaborators in cwd P (spawn_collaborator with distinct
+            spawn_tokens) -> each window my_session_id -> each returns a DISTINCT
+            sid -> check_alive each -> 1; tokens bind to the right sessions
+  Expected: exactly N spawned windows, N distinct session ids, token->sid map
+            matches spawn order; no session bleed
+  Pass:     all sids distinct and alive; token bindings correct
+  Record:   T# in tested&2betest.md sec1 with per-window session ids + token map"""),
+    ("L6 - Correlated connect handshake (T37 live gate)", """\
+  Why:      Wave 2 (HP-05): connect replies must be matched by correlation_id
+            (hello kind='hello' + correlation_id = connection_id); Wave 3 re-runs
+            it because kernel exit/restart now happens while pairs stay registered
+  Prereq:   two live CCs (coordinator + worker) on the same machine
+  Steps:    coordinator connect(worker, connection_id=C1) -> worker replies ->
+            verify reply matched via correlation_id; info.json status=active ->
+            connect with a DIFFERENT id C2 -> CONFLICT; close_connection ->
+            info.json status=closed -> re-connect with C1 -> reuse (no conflict)
+  Expected: correlation-matched reply; single-active CONFLICT; clean close/reuse
+  Pass:     all four observations hold
+  Record:   T# with correlation-match evidence + info.json states"""),
 ]
 
 

@@ -966,3 +966,9 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Result**: FIXED — 7/7 gc tests pass, full suite green (133 tests), parity OK.
 - **Confidence**: high. Lesson: avoid module names that shadow stdlib names in this sys.path-inserted
   test setup; parity gate caught the stale-tree residue.
+
+### T41 — HP-08 unit acceptance: registered-but-idle kernel exits; restart reloads state; GC whitelist holds
+
+- **Method**: unit (test_kernel_exit.py / test_gc.py / test_spawn_token.py / test_spawn_env.py / test_proc_pid_matches.py): exit predicate decoupled from registration (D10); R4 second queue scan (`_exit_decision`); GC whitelist (session_ctrl ≥7d, pending_spawn >TTL, responses ≥7d) never touches pipe/log (structural guardrail test); pending_spawn TTL un-poisons same-token retries; spawn env sanitization (T38 code-level fix); `proc.pid_matches` dedup; `run_gc` kernel-function dispatch. Full auto gate `py -3 tools/run_regression.py --tier auto` → GATE PASS.
+- **Result**: PASS (144 unit tests; parity OK 30 files; auto gate GATE PASS). Live gates (full L1-L6, incl. the mandated L3/L4) deferred to the Wave 3 exit gate per the user's locked decision (run_regression.py now prints L5/L6 checklists too).
+- **Confidence**: high for unit semantics; live verification at Wave 3 exit.

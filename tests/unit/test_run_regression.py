@@ -76,7 +76,7 @@ def test_live_tier_prints_all_checklists_exits_0(capsys):
     rr = _import()
     code, out = _run(rr.main, ["--tier", "live"], capsys)
     assert code == 0
-    for hdr in ("L1", "L2", "L3", "L4"):
+    for hdr in ("L1", "L2", "L3", "L4", "L5", "L6"):
         assert hdr in out
 
 
