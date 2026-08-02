@@ -391,16 +391,22 @@ def send_message(fromid: str, toid: str, message: str,
     return _err(Code.NOT_FOUND, r.get("reason", "send failed"))
 
 
-def evoke(session_id: str) -> dict:
-    """Revive a dead CC on whatever machine it lives on (local or remote)."""
+def evoke(session_id: str, permission_mode: str = "bypass") -> dict:
+    """Revive a dead CC on whatever machine it lives on (local or remote).
+    permission_mode (HP-10/D4): "bypass" default - resume of an established
+    session is not a new trust decision; pass "standard" to override."""
     is_local, machine = _find_target_machine(session_id)
     if not is_local and machine is None:
         return _err(Code.NOT_FOUND, "session not exists")
     try:
         if is_local:
-            r = rpc_client.call("evoke", {"session_id": session_id})
+            r = rpc_client.call("evoke",
+                                {"session_id": session_id,
+                                 "permission_mode": permission_mode})
         else:
-            r = rpc_client.call_remote(machine, "evoke", {"session_id": session_id})
+            r = rpc_client.call_remote(machine, "evoke",
+                                       {"session_id": session_id,
+                                        "permission_mode": permission_mode})
     except KernelError as e:
         return _kernel_err(e)
     if r is None:

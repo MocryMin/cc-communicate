@@ -149,14 +149,17 @@ def withdraw(fromid: str, toid: str, init_connect: int = 0,
 
 
 @mcp.tool()
-def evoke(session_id: str) -> dict:
+def evoke(session_id: str, permission_mode: str = "bypass") -> dict:
     """Revive a dead CC session on whatever machine it lives on (local or remote
     peer). Returns the envelope: ok({evoked: True, session_id}) or
-    err(NOT_FOUND) when the session does not exist."""
-    err = _entry_error((validation.validate_session_id, session_id))
+    err(NOT_FOUND) when the session does not exist. permission_mode
+    (HP-10/D4): "bypass" default - resume of an established session is not a
+    new trust decision; pass "standard" to override."""
+    err = _entry_error((validation.validate_session_id, session_id),
+                       (validation.validate_permission_mode, permission_mode))
     if err:
         return err
-    return user_functions.evoke(session_id)
+    return user_functions.evoke(session_id, permission_mode=permission_mode)
 
 
 @mcp.tool()

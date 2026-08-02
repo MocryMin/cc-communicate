@@ -105,3 +105,30 @@ def test_worker_handle_carries_permission_mode(server):
     h2 = user_functions._worker_handle("s1", "t1", "/tmp", None,
                                        permission_mode="standard")
     assert h2["permission_mode"] == "standard"
+
+
+def test_evoke_kernel_passes_bypass_default(server, monkeypatch):
+    """evoke -> spawn_cc_resume with bypass (D4-b: resume != new trust
+    decision); explicit override allowed."""
+    ka = server.kernel_api
+    calls = {}
+    monkeypatch.setattr(server.spawn, "spawn_cc_resume",
+                        lambda sid, prompt, cwd=None, permission_mode="bypass":
+                        calls.update(mode=permission_mode))
+    ka.evoke({"s1": {"cwd": "/tmp"}}, "s1")
+    assert calls["mode"] == "bypass"
+    ka.evoke({"s1": {"cwd": "/tmp"}}, "s1", permission_mode="standard")
+    assert calls["mode"] == "standard"
+
+
+def test_mcp_evoke_override_param(server, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(user_functions, "evoke",
+                        lambda *a, **k: captured.update(kwargs=k) or {
+                            "ok": True, "code": None, "message": None,
+                            "data": {"evoked": True},
+                            "retryable": False})
+    mcp_server.evoke("s1", permission_mode="standard")
+    assert captured["kwargs"]["permission_mode"] == "standard"
+    r = mcp_server.evoke("s1", permission_mode="root")
+    assert r["ok"] is False and r["code"] == Code.INVALID_ARGUMENT
