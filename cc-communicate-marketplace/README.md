@@ -1,3 +1,9 @@
+> **⚠️ 历史参考，不支持安装（AR-05）**：本目录为加固前（v0.x）的旧实现，
+> 缺 Wave 1-4 全部修复（server 文件、工具数、版本均滞后）。**权威实现**为仓库
+> 根 `v2_win/cc-communicate/`（Windows）+ `v2_wsl/cc-communicate/`（WSL，由
+> `tools/build_artifacts.py generate` 生成）；安装与开发请使用 canonical 树，
+> 勿使用本目录内容。正式发布面以 tag `v0.4.0` 为准。
+
 # cc-communicate — lower-layer (hook / event producer) report
 
 This document covers **one layer only**: the lower layer that CC hooks run to

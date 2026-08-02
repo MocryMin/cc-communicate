@@ -304,7 +304,14 @@ def _handle_start(ev: dict, sid: str):
     }
     known[ev.get("pid")] = parse_start_time(ev.get("start_time"))
     if len(known) > 8:
-        for old_pid in sorted(known, key=known.get)[:-8]:
+        # AR-03: bound-trim by INSERTION ORDER, never by start_time value.
+        # parse_start_time returns None for missing/malformed values, and
+        # sorted(known, key=known.get) then raises TypeError (None vs float)
+        # once >8 events replay. start_time exists only for PID-reuse
+        # validation (proc.pid_matches) - it never decides ordering. dicts
+        # preserve insertion order (Py3.7+), so the first-inserted (oldest)
+        # entries are the trim victims.
+        for old_pid in list(known.keys())[:-8]:
             known.pop(old_pid, None)
     # HP-04: a start event carrying CC_COMMUNICATE_SPAWN_TOKEN binds the
     # session to its spawn request (plan A). Rebuilt on kernel restart via

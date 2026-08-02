@@ -228,6 +228,11 @@ listener - only use the listen/listen_v2 tool.
   automatically when the target is dead. `permission_mode` (HP-10/D4):
   "bypass" default - resume of an established session is not a new trust
   decision; pass "standard" to override.
+  **DEGRADED (AR-04)**: process/session restore SUCCEEDS (resume lands in the
+  original cwd, check_alive -> 1), but on CC v2.1.220 the resumed CC's
+  cc-communicate MCP client may come up disconnected, so delivery after resume
+  is unreliable (T46, 2/2 failed). When the channel must work, prefer
+  spawn-fresh (`spawn_collaborator`); re-test after a CC update.
 - `spawn_collaborator(caller_sid, cwd, spawn_token=None,
   permission_mode="standard", machine=None, hold_time=300) -> dict` - Spawn a
   NEW CC in cwd (on `machine` if given - a `query_machines` entry - else
@@ -248,10 +253,15 @@ listener - only use the listen/listen_v2 tool.
 - `listen_v2(session_id, cursors=None, timeout=30) -> dict` - **PREFERRED.**
   BLOCKING. `data` = `{messages, next_cursors}`; pass `data.next_cursors`
   back unchanged on the next call. Each message is a record envelope. See
-  "The cursor ACK" above for the contract.
+  "The cursor ACK" above for the contract. **Transport honesty (AR-02)**:
+  a store that never answered during the call is listed in
+  `data.degraded_stores`; if the LOCAL kernel never answered, the call
+  returns `err(INTERNAL, retryable=True)` instead of a fake empty success.
 - `query_my_cursors(session_id) -> dict` - Recover `data` =
   `{store_id: sequence}` after compact / restart. Pass the result as
-  `cursors` on your next `listen_v2`.
+  `cursors` on your next `listen_v2`. A store that never answered is listed
+  in `data.degraded_stores`; a local kernel failure returns
+  `err(INTERNAL, retryable=True)`.
 - `listen(session_id, acked_ts=0, timeout=30) -> dict` - LEGACY timestamp
   ACK. Kept one release to drain pre-upgrade `.md` messages. `data` =
   `{messages, watermark}`. Do NOT use for new conversations.

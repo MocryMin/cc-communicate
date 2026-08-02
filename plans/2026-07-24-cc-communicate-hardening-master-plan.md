@@ -160,7 +160,7 @@ parity gate（hash 比对 win/wsl，allow-list 最小化到仅 `.mcp.json` 与�
 - **per-store ordering**：同一 conversation store 内按单调 `sequence` 有序。
 - **detectable duplicates**：每条消息有稳定 `message_id`，接收方可去重。
 - **idempotent mutation**：`send/spawn/evoke` 等 retry 经 `operation_id` + 领域幂等键去重，不产生不可识别重复副作用。
-- **可观测**：所有降级/重试/残留经 `diagnose_transport` + 结构化事件可查。
+- **可观测（分阶段，AR-06 修订）**：H1 期间以结构化 Result/Error（`code` + `retryable` + `data`，含 `degraded_stores`/`degraded_steps` 降级标记）、`backlog_stats`、`run_gc(dry_run)`、kernel log 为替代观测面——降级/重试/残留均可查；`diagnose_transport` 统一诊断接口 + 结构化事件日志（HP-12）为分阶段延后项（G4 分阶段接受），**重启条件**：进入 H2/H3 或第一次真实无法定位的传输故障。
 
 ### 4.2 明确不保证（诚实边界）
 - **不保证**崩溃/跨进程条件下严格 exactly-once（残留一个极窄 crash-window 可能重复，但重复可经 message_id 检测、绝不静默）。
@@ -176,7 +176,7 @@ parity gate（hash 比对 win/wsl，allow-list 最小化到仅 `.mcp.json` 与�
 6. **权限**：spawn 默认 `standard`；无人值守自动化显式 `permission_mode="bypass"` 并在自己的文档标记受控。
 
 ### 4.4 新增/变更的 API 面
-- 新增：`listen_v2`、`query_my_cursors`、`spawn_collaborator`、`diagnose_transport`（+ 可能的 `ack_through`、`accept_connection`、`reply_message`）。
+- 新增：`listen_v2`、`query_my_cursors`、`spawn_collaborator`、`diagnose_transport`（+ 可能的 `ack_through`、`accept_connection`、`reply_message`）。`diagnose_transport` 随 HP-12 分阶段延后（AR-06，见 §4.1 重启条件）。
 - 变更：`listen`/`close_connection` 支持 cursor；`create_collaborator` 转 legacy wrapper；多个工具返回结构化结果。
 - 不变：身份/发现/存活（`my_session_id`/`query_session`/`check_alive`/`query_machines`）、跨 realm 路由语义。
 

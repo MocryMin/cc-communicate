@@ -54,7 +54,10 @@ LIVE_CHECKLISTS = [
   Expected: resume lands in cwd P (session_ctrl start event cwd == P);
             delivery succeeds; no "No conversation found"
   Pass:     reconnect succeeds with correct cwd
-  Record:   T# with resume cwd evidence (session_ctrl start event cwd field)"""),
+  Record:   T# with resume cwd evidence (session_ctrl start event cwd field)
+  Note:     AR-04 - if the resume round-trip still fails on the CC-side MCP
+            disconnect (T46), record the gate as DEGRADED + spawn-fresh
+            fallback, NOT PASS (the round-trip defines the gate)"""),
     ("L3 - Cross-realm cursor live gate (R2)", """\
   Why:      per-store cursors must stay independent across host<->WSL with no
             cross-clock interference (PB-3 fix, live) - master plan R2's live gate
@@ -175,13 +178,19 @@ def syntax_check():
 
 def pytest_run():
     """T1: full pytest suite. On RED print the output tail so the failure is
-    diagnosable without re-running."""
+    diagnosable without re-running. N-02: also print the stderr tail - a
+    missing gate dependency (e.g. pytest itself) crashes with an empty
+    stdout, which the old stdout-only tail could not diagnose."""
     r = _run([sys.executable, "-m", "pytest", "-q"])
     detail = next((ln for ln in reversed(r.stdout.splitlines()) if ln.strip()),
                   "").strip()
     if r.returncode:
         print("--- pytest output (tail) ---")
         print("\n".join(r.stdout.splitlines()[-40:]))
+        err_lines = [ln for ln in r.stderr.splitlines() if ln.strip()]
+        if err_lines:
+            print("--- pytest stderr (tail) ---")
+            print("\n".join(err_lines[-20:]))
         print("--- end ---")
         return RED, detail or "pytest exit %d" % r.returncode
     return PASS, detail

@@ -1,7 +1,13 @@
 """T30 regression: SessionStart double-fire can leave a dead pid as primary;
 check_alive must fall back across known_pids (every pid ever recorded for the
 sid) instead of trusting the last event alone. Without this, check_alive
-returns 0 for a LIVE session and connect's revive path spawns a second window."""
+returns 0 for a LIVE session and connect's revive path spawns a second window.
+
+AR-03: the known_pids bound-trim must trim by INSERTION ORDER, not by
+start_time value (None start_time made sorted() raise TypeError on replay of
+9+ events)."""
+import os
+
 import pytest
 
 
@@ -76,6 +82,88 @@ def test_known_pids_bounded(server, monkeypatch):
         ev = dict(ev, pid=i + 100, event_ts=i)
         k._handle_start(ev, "sess-t30")
     assert len(server.kernel.alive_sessions["sess-t30"]["known_pids"]) <= 8
+
+
+# ---------- AR-03: bound-trim must not sort on start_time ----------
+# The old sorted(known, key=known.get)[:-8] raised TypeError once >8 events
+# replayed with None/mixed start_time (None vs float comparison). Trim is by
+# INSERTION ORDER; start_time serves only PID-reuse validation. Tests use the
+# REAL parse_start_time (None for missing, float for valid ISO).
+
+
+def test_known_pids_all_none_no_crash(server):
+    """9+ SessionStart events with start_time=None -> no crash (all-None
+    sorted() raised TypeError too: None < None), bounded, and the 8 most
+    recent events survive (insertion-order trim semantics)."""
+    k = server.kernel
+    for i in range(12):
+        ev = {"event": "start", "event_ts": i, "session_id": "sess-ar03",
+              "pid": 100 + i, "cwd": "/tmp/x", "start_time": None,
+              "source": "startup"}
+        k._handle_start(ev, "sess-ar03")
+    known = server.kernel.alive_sessions["sess-ar03"]["known_pids"]
+    assert len(known) <= 8
+    assert list(known) == list(range(104, 112))  # oldest 4 trimmed, order kept
+
+
+def test_known_pids_mixed_none_float_no_crash(server):
+    """9+ events mixing None and float start_time -> no crash, bounded (the
+    old code compared None against float and raised)."""
+    k = server.kernel
+    for i in range(12):
+        start = None if i % 2 else "2026-08-03T00:00:00Z"
+        ev = {"event": "start", "event_ts": i, "session_id": "sess-ar03",
+              "pid": 200 + i, "cwd": "/tmp/x", "start_time": start,
+              "source": "startup"}
+        k._handle_start(ev, "sess-ar03")
+    known = server.kernel.alive_sessions["sess-ar03"]["known_pids"]
+    assert len(known) <= 8
+    assert list(known) == list(range(204, 212))
+
+
+def test_known_pids_pid_dup_bounded_check_alive_ok(server, monkeypatch):
+    """PID re-starting multiple times: bounded, and check_alive keeps working
+    (no regression from the trim change)."""
+    ka = server.kernel_api
+    k = server.kernel
+    monkeypatch.setattr(k, "parse_start_time", lambda _s: 1000.0)
+    fake = {300: 1000.0}  # only pid 300 is alive
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
+    # 10 distinct pids with 300 starting last (survives the trim) + dups
+    pids = [301, 302, 303, 304, 305, 306, 307, 308, 309, 300, 300, 300]
+    for i, pid in enumerate(pids):
+        ev = {"event": "start", "event_ts": i, "session_id": "sess-ar03",
+              "pid": pid, "cwd": "/tmp/x", "start_time": "unused",
+              "source": "startup"}
+        k._handle_start(ev, "sess-ar03")
+    alive = server.kernel.alive_sessions
+    known = alive["sess-ar03"]["known_pids"]
+    assert len(known) <= 8
+    assert alive["sess-ar03"]["pid"] == 300  # primary = last event
+    assert ka.check_alive(alive, "sess-ar03") == 1  # known_pids fallback works
+    assert alive["sess-ar03"]["pid"] == 300
+
+
+def test_known_pids_old_log_replay_no_crash(server):
+    """Kernel restart replays persisted session_ctrl start events via
+    process_session_ctrl_event (the real restart path): 9+ events with
+    missing/mixed start_time -> no crash, bounded."""
+    import json
+    k = server.kernel
+    server.paths.ensure_runtime_dirs()
+    sdir = server.paths.SESSION_CTRL_DIR
+    for i in range(10):
+        ev = {"event": "start", "event_ts": 1000 + i,
+              "session_id": "sess-ar03", "pid": 400 + i, "cwd": "/tmp/x",
+              "start_time": None if i % 2 else "2026-08-03T01:00:00Z",
+              "source": "startup"}
+        with open(os.path.join(sdir, "start_%d_%d.json" % (1000 + i, i)),
+                  "w", encoding="utf-8") as f:
+            json.dump(ev, f)
+    assert k.process_session_ctrl_event() is True
+    known = k.alive_sessions["sess-ar03"]["known_pids"]
+    assert len(known) <= 8
+    assert k.sessions["sess-ar03"]["pid"] == 409  # last event processed
 
 
 # ---------- T35: session_by_pid known_pids fallback (the my_session_id hole) ----------

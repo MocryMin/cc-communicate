@@ -36,6 +36,15 @@ spawn policy below.
 A spawned `standard`-mode CC may stall at the trust dialog until a human
 approves — that is the designed cost of the secure default.
 
+## Resume (evoke) status — DEGRADED (AR-04)
+
+`evoke`/`spawn_cc_resume` restores the **process/session** (resume lands in
+the original cwd, check_alive → 1), but on CC v2.1.220 the revived CC's
+cc-communicate MCP client may come up disconnected, so **delivery after
+resume is unreliable** (T46, 2/2 failed — CC-side quirk, no cc-communicate
+error). When the channel must work, prefer **spawn-fresh**
+(`spawn_collaborator`); re-test after a CC update to upgrade the status.
+
 ## Configuration (env vars)
 
 `CC_COMMUNICATE_DATA_DIR`, `CC_COMMUNICATE_MAX_INLINE_BYTES`,

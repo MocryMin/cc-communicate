@@ -190,3 +190,151 @@ def test_close_connection_uploads_cursors_per_store(server, monkeypatch):
     assert ("local", "upload_cursor", {"sid": "bob", "seq": 6}) in uploads
     assert ("host", "upload_cursor", {"sid": "bob", "seq": 3}) in uploads
     assert all(s[2].get("seq") != 1 for s in uploads)  # unknown store 被忽略
+
+
+# ---------- AR-02: transport failure must NOT be masked as empty success ----------
+# rpc_client.call() raises KernelError (local); call_remote() returns None on
+# failure (remote). listen_v2/query_my_cursors must distinguish "successful
+# scan, no messages" (legal empty) from "zero successful scans" (error), and
+# report partially-unreachable stores via `degraded_stores` without losing
+# already-scanned messages.
+
+_MSG = {"sequence": 6, "store_id": LOCAL, "message_id": "x1",
+        "from_session": "alice", "to_session": "bob", "kind": "text",
+        "correlation_id": None, "causation_id": None, "created_at_ms": 100,
+        "payload": {"text": "local-msg"}}
+
+
+def _uf(server, monkeypatch, local_call, remote_call, host=True):
+    """user_functions bound to fake local/remote RPC; returns the module."""
+    import importlib
+    uf = importlib.import_module("user_functions")
+    monkeypatch.setattr(uf.rpc_client, "call", local_call)
+    monkeypatch.setattr(uf.rpc_client, "call_remote", remote_call)
+    monkeypatch.setattr(uf, "_host_entry",
+                        (lambda: {"id": HOST, "type": "win-host"}) if host
+                        else (lambda: None))
+    monkeypatch.setattr(uf.machine_identity, "load_or_create",
+                        lambda: {"id": LOCAL, "type": "wsl-test"})
+    monkeypatch.setattr(uf, "_LISTEN_POLL", 0.05)
+    return uf
+
+
+def test_listen_v2_local_kernel_unreachable_returns_error(server, monkeypatch):
+    """Injection 1 (审核方 §3 AR-02): local kernel unreachable -> structured
+    INTERNAL error (retryable), NOT an empty success."""
+    def dead_call(fn, args, **kw):
+        raise server.rpc_client.KernelError("kernel down")
+    uf = _uf(server, monkeypatch, dead_call, lambda m, f, a, **kw: None,
+             host=False)
+    r = uf.listen_v2("bob", timeout=1)
+    assert r["ok"] is False
+    assert r["code"] == "INTERNAL" and r["retryable"] is True
+    assert "kernel unreachable" in r["message"]
+
+
+def test_listen_v2_remote_unreachable_degrades_empty_success(server, monkeypatch):
+    """Injection 2 (审核方 §3 AR-02): remote unreachable -> the local result
+    is still a legal empty success, but carries the degraded marker."""
+    uf = _uf(server, monkeypatch,
+             lambda f, a, **kw: {"store_id": LOCAL, "next_cursor": 0,
+                                 "messages": []},
+             lambda m, f, a, **kw: None)
+    r = uf.listen_v2("bob", timeout=1)
+    assert r["ok"] is True
+    assert r["data"]["messages"] == []
+    assert r["data"]["degraded_stores"] == [HOST]
+
+
+def test_listen_v2_partial_reachable_keeps_messages_with_degraded(server, monkeypatch):
+    """Injection 3 (审核方 §3 AR-02): local OK + remote failed -> already-
+    scanned messages are returned, with the degraded marker."""
+    uf = _uf(server, monkeypatch,
+             lambda f, a, **kw: {"store_id": LOCAL, "next_cursor": 6,
+                                 "messages": [_MSG]},
+             lambda m, f, a, **kw: None)
+    r = uf.listen_v2("bob", timeout=1)
+    assert r["ok"] is True
+    assert [m["message_id"] for m in r["data"]["messages"]] == ["x1"]
+    assert r["data"]["degraded_stores"] == [HOST]
+
+
+def test_listen_v2_local_dead_remote_messages_not_lost(server, monkeypatch):
+    """Local dead + remote answered with messages: the scanned messages are
+    NOT lost - returned with degraded_stores naming the local store."""
+    def dead_call(fn, args, **kw):
+        raise server.rpc_client.KernelError("kernel down")
+    uf = _uf(server, monkeypatch, dead_call,
+             lambda m, f, a, **kw: {"store_id": HOST, "next_cursor": 0,
+                                    "messages": [dict(_MSG, store_id=HOST)]})
+    r = uf.listen_v2("bob", timeout=1)
+    assert r["ok"] is True
+    assert len(r["data"]["messages"]) == 1
+    assert r["data"]["degraded_stores"] == [LOCAL]
+
+
+def test_listen_v2_full_success_has_no_degraded_key(server, monkeypatch):
+    """Both stores answered (even with no messages) -> no degraded_stores key
+    (the clean path stays byte-shape-stable for existing callers)."""
+    uf = _uf(server, monkeypatch,
+             lambda f, a, **kw: {"store_id": LOCAL, "next_cursor": 0,
+                                 "messages": []},
+             lambda m, f, a, **kw: {"store_id": HOST, "next_cursor": 0,
+                                    "messages": []})
+    r = uf.listen_v2("bob", timeout=1)
+    assert r["ok"] is True
+    assert "degraded_stores" not in r["data"]
+
+
+def test_query_my_cursors_local_unreachable_returns_error(server, monkeypatch):
+    """AR-02 (query_my_cursors 同理): local kernel down -> error, not ok({})."""
+    def dead_call(fn, args, **kw):
+        raise server.rpc_client.KernelError("kernel down")
+    uf = _uf(server, monkeypatch, dead_call, lambda m, f, a, **kw: None)
+    r = uf.query_my_cursors("bob")
+    assert r["ok"] is False
+    assert r["code"] == "INTERNAL" and r["retryable"] is True
+
+
+def test_query_my_cursors_remote_unreachable_degraded(server, monkeypatch):
+    """AR-02 (query_my_cursors 同理): local OK + remote failed -> local
+    cursors returned with the degraded marker (no fake empty ok)."""
+    uf = _uf(server, monkeypatch,
+             lambda f, a, **kw: {LOCAL: 6} if f == "query_cursors" else None,
+             lambda m, f, a, **kw: None)
+    r = uf.query_my_cursors("bob")
+    assert r["ok"] is True
+    assert r["data"][LOCAL] == 6
+    assert r["data"]["degraded_stores"] == [HOST]
+
+
+# ---------- N-01: close_connection reports degraded best-effort steps ----------
+
+
+def test_close_connection_reports_degraded_steps(server, monkeypatch):
+    """N-01: best-effort steps that actually failed are reported via
+    degraded_steps - the return is no longer a constant {closed: true} (the
+    upper layer can decide whether to leave a cleanup task). closed stays
+    True and nothing raises."""
+    import importlib
+    uf = importlib.import_module("user_functions")
+
+    def broken_call(fn, args=None, **kw):
+        raise server.rpc_client.KernelError("kernel down")
+
+    monkeypatch.setattr(uf.rpc_client, "call", broken_call)
+    monkeypatch.setattr(uf.rpc_client, "call_remote", lambda m, f, a, **kw: None)
+    monkeypatch.setattr(uf.rpc_client, "submit_remote_noblock",
+                        lambda m, f, a=None, **kw: None)
+    monkeypatch.setattr(uf, "_host_entry", lambda: {"id": HOST, "type": "win-host"})
+    monkeypatch.setattr(uf, "_conv_store", lambda toid: None)
+    monkeypatch.setattr(uf.machine_identity, "load_or_create",
+                        lambda: {"id": LOCAL, "type": "wsl-test"})
+    r = uf.close_connection("bob", "alice", acked_ts=5,
+                            cursors={LOCAL: 6, HOST: 3})
+    assert r["ok"] is True and r["data"]["closed"] is True
+    steps = r["data"]["degraded_steps"]
+    assert "upload_ack_timestamp" in steps
+    assert "upload_cursor:" + LOCAL in steps
+    assert "notify_peer" in steps
+    assert "deactivate_connection" in steps

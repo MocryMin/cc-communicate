@@ -2,4 +2,7 @@
 # Install with:  python -m pip install -r server/requirements.txt
 psutil>=5.9
 filelock>=3.12
-mcp>=1.28
+# AR-01: the server imports `from mcp.server.fastmcp import FastMCP` (MCP 1.x
+# API). MCP 2.x removed that module - an unbounded >=1.28 silently installs
+# 2.x on a fresh environment and the server fails to import. Pin major 1.
+mcp>=1.28,<2

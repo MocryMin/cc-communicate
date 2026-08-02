@@ -604,18 +604,22 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0,
     uploads per-store cursors when given (HP-02): each cursor goes ONLY to the
     kernel owning that store; unknown store ids are ignored. Does NOT clean up
     the pipe - per the ts-based ACK design, un-acked messages stay and are
-    archived lazily via the watermark on the next listen."""
+    archived lazily via the watermark on the next listen. N-01: best-effort
+    steps that actually failed are reported via `degraded_steps` in data
+    (absent when everything succeeded, so the clean shape is unchanged) -
+    still non-blocking, never raises, `closed` stays True."""
 
     conv_remote = _conv_store(toid)
     notice = ("[CONNECTION CLOSED by " + session_id + "] To close your side and "
               "preserve your message state, call close_connection(your_sid, " +
               session_id + ", your_latest_ACK_ts). If you have lost your ts, call "
               "query_my_ACK_timestamp(your_sid) first, then close_connection.")
+    degraded_steps = []
     # 1. upload the caller's watermark to the home kernel (persisted)
     try:
         rpc_client.call("upload_ack_timestamp", {"sid": session_id, "ts": acked_ts})
     except Exception:
-        pass
+        degraded_steps.append("upload_ack_timestamp")
     # 1b. upload per-store cursors (HP-02) - each to its owning kernel only
     if cursors:
         local_id, host = _store_ids()
@@ -629,7 +633,7 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0,
                                            {"sid": session_id, "seq": seq})
                 # unknown store ids are ignored by design
             except Exception:
-                pass
+                degraded_steps.append("upload_cursor:" + str(store_id))
     # 2. notify the peer + unregister (fire-and-forget if the conv is remote)
     try:
         if conv_remote is None:
@@ -645,14 +649,17 @@ def close_connection(session_id: str, toid: str, acked_ts: int = 0,
                 conv_remote, "unregister_conversation",
                 {"sid_a": session_id, "sid_b": toid})
     except Exception:
-        pass  # best-effort: never block the caller's exit on a notify/unregister failure
+        degraded_steps.append("notify_peer")  # best-effort: never block the caller's exit
     # 2b. mark the connection closed (info.json status=closed; HP-05/D9) -
     # routed like unregister (fire-and-forget if the conv is remote)
     try:
         _deactivate_connection(session_id, toid, conv_remote)
     except Exception:
-        pass  # best-effort, like the notify above
-    return _ok({"closed": True})
+        degraded_steps.append("deactivate_connection")  # best-effort, like the notify
+    data = {"closed": True}
+    if degraded_steps:
+        data["degraded_steps"] = degraded_steps
+    return _ok(data)
 
 
 # ---------- cursor-ACK listening (HP-02; preferred over legacy listen) ----------
@@ -664,18 +671,36 @@ def _store_ids():
     return local_id, _host_entry()
 
 
+def _degraded_stores(local_id, host, local_ok: bool, remote_ok: bool) -> list:
+    """Store ids with zero successful scans during this call (AR-02). host is
+    None when we ARE the host (then there is no remote store to report)."""
+    degraded = []
+    if not local_ok:
+        degraded.append(local_id)
+    if host is not None and not remote_ok:
+        degraded.append(host.get("id"))
+    return degraded
+
+
 def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
     """BLOCKING listen with PER-STORE cursors (HP-02). `cursors` maps
     store_id -> confirmed sequence ({} or None the first time; recover with
     query_my_cursors after compact/restart). Each store is scanned with ONLY
     its own cursor - cursors are never merged or compared across stores.
-    Returns {messages, next_cursors}. Cancel-safe: the kernel archives only
-    what you confirmed via the cursors you passed. Persist the messages to
-    YOUR store first, THEN advance cursors (transport receipt != task done).
-    NEVER fall back to the timestamp `listen` once you use cursors."""
+    Returns {messages, next_cursors}; when a store never answered this call
+    the result carries `degraded_stores` ([store_id, ...]). Cancel-safe: the
+    kernel archives only what you confirmed via the cursors you passed.
+    Persist the messages to YOUR store first, THEN advance cursors (transport
+    receipt != task done). NEVER fall back to the timestamp `listen` once you
+    use cursors. AR-02: a transport failure is NOT masked as empty success -
+    if the LOCAL kernel never answered by the deadline, the call fails
+    INTERNAL/retryable (an unscanned local store cannot be trusted); a host
+    store that never answered degrades the result instead of losing it."""
     cursors = dict(cursors or {})
     local_id, host = _store_ids()
     deadline = time.time() + timeout
+    local_ok = False   # at least one successful LOCAL scan this call (AR-02)
+    remote_ok = False  # at least one successful HOST scan this call (AR-02)
     while time.time() < deadline:
         messages = []
         next_cursors = dict(cursors)
@@ -683,8 +708,9 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
             r = rpc_client.call("listen_scan_v2",
                                 {"sid": session_id, "cursor": cursors.get(local_id, 0)})
         except Exception:
-            r = None  # transient kernel issue -> treat as empty, retry
+            r = None  # transient kernel issue -> retry next poll (still tracked)
         if isinstance(r, dict):
+            local_ok = True
             messages.extend(r.get("messages") or [])
             nc = r.get("next_cursor", 0)
             if nc > next_cursors.get(local_id, 0):
@@ -694,6 +720,7 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
             rr = rpc_client.call_remote(host, "listen_scan_v2",
                                         {"sid": session_id, "cursor": cursors.get(hid, 0)})
             if isinstance(rr, dict):
+                remote_ok = True
                 messages.extend(rr.get("messages") or [])
                 nc = rr.get("next_cursor", 0)
                 if nc > next_cursors.get(hid, 0):
@@ -704,26 +731,56 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
             messages.sort(key=lambda m: (m.get("created_at_ms", 0),
                                          m.get("store_id") or "",
                                          m.get("sequence", 0)))
-            return _ok({"messages": messages, "next_cursors": next_cursors})
+            data = {"messages": messages, "next_cursors": next_cursors}
+            degraded = _degraded_stores(local_id, host, local_ok, remote_ok)
+            if degraded:
+                data["degraded_stores"] = degraded
+            return _ok(data)
         time.sleep(_LISTEN_POLL)
-    return _ok({"messages": [], "next_cursors": cursors})
+    if not local_ok:
+        # Zero successful local scans: the caller cannot distinguish "worker
+        # silent" from "transport broken" - that distinction is the point of
+        # HP-07. A local kernel down is INTERNAL (it is on this machine).
+        return _err(Code.INTERNAL,
+                    "local kernel unreachable (listen_scan_v2 never succeeded)",
+                    retryable=True)
+    data = {"messages": [], "next_cursors": cursors}
+    degraded = _degraded_stores(local_id, host, local_ok, remote_ok)
+    if degraded:
+        data["degraded_stores"] = degraded
+    return _ok(data)
 
 
 def query_my_cursors(session_id: str) -> dict:
     """Recover your per-store cursors, merged across this machine + the host
-    (each kernel persists only its own store's cursors)."""
+    (each kernel persists only its own store's cursors). AR-02: a local
+    kernel failure is NOT returned as an empty success - it fails
+    INTERNAL/retryable; a failed host query degrades to the local result with
+    a `degraded_stores` marker in data."""
     local_id, host = _store_ids()
     out = {}
+    local_ok = False
+    remote_ok = False
     try:
         r = rpc_client.call("query_cursors", {"sid": session_id})
     except Exception:
         r = None
     if isinstance(r, dict):
+        local_ok = True
         out.update(r)
     if host is not None:
         rr = rpc_client.call_remote(host, "query_cursors", {"sid": session_id})
         if isinstance(rr, dict):
+            remote_ok = True
             out.update(rr)
+    if not local_ok:
+        return _err(Code.INTERNAL,
+                    "local kernel unreachable (query_cursors failed)",
+                    retryable=True)
+    degraded = _degraded_stores(local_id, host, local_ok, remote_ok)
+    if degraded:
+        out = dict(out)
+        out["degraded_stores"] = degraded
     return _ok(out)
 
 

@@ -1,0 +1,5 @@
+# Dev/gate dependencies for cc-communicate (N-03). The wave-exit gate's T1
+# tier runs `python -m pytest -q`; a clean checkout needs these to make the
+# "one command verifies" claim (run_regression.py) actually true.
+# Install with:  python -m pip install -r requirements-dev.txt
+pytest>=8

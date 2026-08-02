@@ -1036,11 +1036,11 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   - **L1 spawn-race PASS**: spawn → exactly one registered worker per token (`bb105bac`, `f99fe4f6`, `9f5e3f76`,
     `0e204031`); same-token retry returns the SAME handle without re-spawn; check_alive=1; token map binds; the new
     WorkerHandle carries `permission_mode` (HP-10 live evidence).
-  - **L2 reconnect PASS-with-finding**: dead (check_alive=0) → evoke → alive in 2s, resume lands in the original cwd
+  - **L2 reconnect DEGRADED (T46)**: dead (check_alive=0) → evoke → alive in 2s, resume lands in the original cwd
     (T25), and the saved transcript proves the T38 fix live (workers are resumable). Delivery AFTER resume FAILED
     twice (2/2): the resumed CC's cc-communicate MCP client comes up DISCONNECTED (see T46) → the worker cannot
     listen/ack → the delivery message stays in the pipe. Delivery path itself re-verified via fresh spawns (L4:
-    10/10 acked).
+    10/10 acked). AR-04: this is `DEGRADED`, not "PASS + finding" - see T46.
   - **L4 multi-collab stress PASS**: 2 workers × 5 tagged messages = 10 sent, 10/10 acked (archived exactly once,
     zero loss/dup); one worker replied 5/5 with message_id echoes (collected via coordinator listen_v2, 5/5 matched);
     the other acked without replying (autonomy variance, not loss).
@@ -1052,12 +1052,22 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   - **L3 cross-realm NOT RUN**: needs the WSL side (v2_wsl deployment + WSL CC + handshake) — environment not set up
     this session. Recorded as blocked-environment, to run in a follow-up (it is the one gate the kimi-k3 mandate
     explicitly required).
-- **Result**: L1/L4/L5/L6 PASS; L2 PASS-with-finding (T46); L3 blocked-environment. Auto gate GATE PASS (193 tests,
+- **Result**: L1/L4/L5/L6 PASS; **L2 DEGRADED (T46)**; L3 blocked-environment. Auto gate GATE PASS (193 tests,
   parity OK 32 files) was re-run before the live session.
 - **Confidence**: high for the run gates; L3 explicitly pending.
 
-### T46 — Finding: resumed CC's cc-communicate MCP client disconnected (CC v2.1.220 resume quirk)
+### T46 — L2 DEGRADED: resumed CC's cc-communicate MCP client disconnected (CC v2.1.220 resume quirk)
 
+- **Classification (AR-04)**: L2 = `DEGRADED`, NOT "PASS + finding" — those two
+  statements cannot both be true in a capability contract. Split of the two
+  halves: **process/session recovery SUCCEEDS** (resume lands in the original
+  cwd, check_alive → 1), **communication recovery FAILS** on this CC version
+  (the revived CC's MCP client comes up disconnected → delivery after resume
+  2/2 failed). `evoke` promises process/session restore only; channel readiness
+  is not restored. Contract fix: upper layer uses **spawn-fresh fallback** for
+  H1 (fixed new workers; resume unavailable until a CC update re-tests green).
+  Upgrade path: re-run L2 after a CC update; if the resumed round-trip passes,
+  the status upgrades from DEGRADED.
 - **Symptom**: after evoke→`claude --resume`, the revived worker's window reports "cc-communicate MCP server
   currently disconnected (tools unavailable)" — 2/2 resumes (f99fe4f6, 9f5e3f76). The delivery message sent to the
   revived worker is never acked (stays in pipe). Both resumed windows also showed a stray `❯ bypass` user line in
@@ -1129,3 +1139,49 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   path untouched. Wave 3's L1-L6 gates remain the standing protocol gates; this wave added L7 (smoke) to
   the checklists.
 - **Confidence**: high — real CC worker, real WSL peer, real store records, auto gate re-run at exit.
+
+### T50 — Acceptance-revision execution: AR-01~06 + N-01~03 (customer REVISE_REQUESTED -> re-acceptance ready)
+
+- **Context**: customer acceptance review (`docs/superpowers/reviews/2026-08-03-hardening-acceptance-review.md`)
+  returned `REVISE_REQUESTED` (Waves 1-4 architecture `ACCEPTED_IN_PRINCIPLE`; 6 AR proposals + 4 N-notes).
+  K3 dispatched the task book (`docs/superpowers/plans/2026-08-03-acceptance-revision-plan.md`); executed
+  inline per its 执行约束 (edit v2_win only -> `tools/build_artifacts.py generate` -> commit both trees).
+- **AR-01 (P0, MCP pin)**: `server/requirements.txt` `mcp>=1.28` -> `mcp>=1.28,<2` (MCP 2.0 removed
+  `mcp.server.fastmcp`; clean installs resolved to 2.0.0 and failed to import). Gate: 3 tests in
+  `tests/unit/test_mcp_dependency_gate.py` (declaration pin, fresh-interpreter fastmcp import, dev-dep entry).
+- **AR-02 (P0, transport honesty)**: `listen_v2`/`query_my_cursors` now track per-side scan success
+  (`rpc_client.call` raises KernelError locally / `call_remote` returns None remotely). At deadline: local
+  zero success -> `err(INTERNAL, retryable=True)` (no fake empty success); local ok + host fail -> result +
+  `degraded_stores` marker; scanned messages never lost (local-dead + remote-messages returns them with the
+  marker). 7 injection tests (3 mandated failure classes + full-success no-key + query_my_cursors pair).
+- **AR-03 (P0, known_pids)**: `kernel.py` `_handle_start` bound-trim `sorted(known, key=known.get)` ->
+  insertion-order `list(known.keys())[:-8]` (sorted() raised TypeError comparing None vs float on 9+ replay).
+  start_time used only for PID-reuse validation. 4 tests: all-None, None+float mixed, PID dup + check_alive
+  no regression, real restart replay via `process_session_ctrl_event` (10 events).
+- **N-01/02/03**: `close_connection` reports failed best-effort steps via `degraded_steps` (clean path shape
+  byte-unchanged; +1 test); `run_regression.pytest_run` prints stderr tail on RED (+1 test); new
+  `requirements-dev.txt` (pytest) at repo root (asserted by the AR-01 gate file).
+- **Auto gate (raw output)**: `py -3 tools/run_regression.py` ->
+  T0 syntax PASS (44 .py + 2 .js) / T1 pytest PASS (**220 passed** = 204 + 16 new) /
+  T2 parity PASS (32) / T2 artifacts PASS (33, templates pinned) / **GATE: PASS**.
+  Artifacts regenerated after the SKILL.md change; 0-diff invariant holds.
+- **AR-04 (P1, resume/L2)**: T46 + T45 reclassified `PASS + finding` -> **DEGRADED** (process/session
+  recovery succeeds; communication recovery fails on CC v2.1.220, 2/2). Completion report §3.1 row +
+  new §3.7 能力降级声明 (spawn-fresh fallback + CC-update re-test upgrade path); SKILL.md evoke entry
+  DEGRADED note. No code change (T46 stays CC-side attribution).
+- **AR-05 (P1, release surface)**: `cc-communicate-marketplace/README.md` top banner (option 2: 历史参考，
+  不支持安装；权威实现 v2_win/ + v2_wsl/ build_artifacts.py 生成); tag **v0.4.0** on the delivery commit;
+  acceptance review + completion report + task book + all fixes committed in the delivery commit.
+- **AR-06 (P1, HP-12/G4 contract)**: completion report HP-12 -> `DEFERRED (分阶段接受)` everywhere
+  (§1.1/§2/§3.1/§3.4/§4/§6.1/§8): H1 alternative observability (structured Result/Error incl.
+  degraded markers + backlog_stats + run_gc(dry_run) + kernel log) + restart condition (进入 H2/H3 或
+  第一次真实无法定位的传输故障); master plan §4.1 可观测 promise -> phased wording (+§4.4 note).
+- **Re-acceptance gates (7/7)**: (1) fresh-env import gate test; (2) 220 + T0/T2 green; (3) listen_v2/
+  query_my_cursors distinguish empty-success vs scan-failure (injection tests); (4) 9+ replay with
+  missing/mixed start_time no crash; (5) L2 DEGRADED + spawn-fresh fallback, no PASS claim; (6) parity 32 +
+  artifacts 33 + authoritative install entry + 20 tools + version identity = v0.4.0; (7) corrected
+  completion report (AR dispositions + raw gate output) in the final commit.
+- **Result**: PASS — all 6 AR + 3 N dispositions DONE, delivery commit + tag v0.4.0 prepared.
+- **Confidence**: high — every AR locked by new tests except AR-04/06 (contract corrections; re-verified by
+  report/plan text consistency) and AR-05's tag (commit-level identity). T46 re-test remains the standing
+  upgrade path.

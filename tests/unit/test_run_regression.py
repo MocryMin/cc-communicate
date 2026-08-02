@@ -103,3 +103,20 @@ def test_artifact_tier_red_fails_gate(monkeypatch, capsys):
     code, out = _run(rr.main, ["--tier", "auto"], capsys)
     assert code == 1
     assert "T2 artifacts" in out and "RED" in out
+
+
+def test_pytest_red_prints_stderr_tail(monkeypatch, capsys):
+    """N-02: on T1 RED the gate also shows the stderr tail - a missing gate
+    dependency (e.g. pytest) crashes with empty stdout, which the old
+    stdout-only tail could not diagnose."""
+    import subprocess
+    rr = _import()
+    monkeypatch.setattr(
+        rr, "_run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [], 1, stdout="1 failed\n", stderr="ModuleNotFoundError: nope"))
+    status, detail = rr.pytest_run()
+    out = capsys.readouterr().out
+    assert status == rr.RED
+    assert "1 failed" in out  # stdout tail still printed
+    assert "pytest stderr" in out and "ModuleNotFoundError: nope" in out
