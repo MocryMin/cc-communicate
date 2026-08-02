@@ -159,6 +159,16 @@ def validate_artifact_refs(value) -> list:
     return out
 
 
+def validate_permission_mode(value) -> str:
+    """HP-10 (D4): spawn permission mode - "standard" (default for NEW
+    spawns; the spawned CC makes normal permission decisions) or "bypass"
+    (explicit opt-in for unattended automation; skips the trust dialog)."""
+    if value not in ("standard", "bypass"):
+        raise InvalidArgumentError(
+            f"permission_mode must be 'standard' or 'bypass'; got {value!r}")
+    return value
+
+
 def validate_cwd(value) -> str:
     """Absolute + existing directory. NO character whitelist (CJK/space ok)."""
     if not isinstance(value, str) or not value:

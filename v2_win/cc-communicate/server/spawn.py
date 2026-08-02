@@ -55,6 +55,16 @@ def _child_env(spawn_token: str = None) -> dict:
     return env
 
 
+def _permission_argv(mode: str) -> list:
+    """HP-10 (D4): argv fragment for the spawn's permission mode. "bypass"
+    skips the workspace-trust dialog (unattended automation opt-in); the
+    "standard" default omits the flag so the spawned CC makes normal
+    permission decisions (a trust dialog may appear)."""
+    if mode == "bypass":
+        return ["--dangerously-skip-permissions"]
+    return []
+
+
 def _claude_bin() -> str:
     """The claude binary to invoke. Windows: 'claude' (on PATH). Linux: the full
     path from machine_identity (or fall back to 'claude' if undetected)."""
@@ -95,35 +105,38 @@ def _tmux_spawn(cwd: str, claude_argv: list, env_token: str = None):
     )
 
 
-def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None):
+def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None,
+                 permission_mode: str = "standard"):
     """Spawn a NEW interactive CC in cwd (for create_collaborator /
     spawn_collaborator). `claude <prompt>` (no -p) processes the prompt then
-    enters the REPL (stays alive). `--dangerously-skip-permissions` skips the
-    workspace-trust dialog (Amd9). cwd is set via Popen (T25). spawn_token
-    (HP-04) is injected into the child environment so the SessionStart hook
-    can bind the session to its spawn request (plan A, D8)."""
+    enters the REPL (stays alive). permission_mode (HP-10/D4): "standard"
+    default - the spawned CC decides permissions normally; "bypass" adds
+    --dangerously-skip-permissions (unattended automation opt-in). cwd is
+    set via Popen (T25). spawn_token (HP-04) is injected into the child
+    environment so the SessionStart hook can bind the session to its spawn
+    request (plan A, D8)."""
     if os.name == "nt":
-        _detached_popen(["cmd", "/c", "start", "claude",
-                         "--dangerously-skip-permissions", prompt],
+        _detached_popen(["cmd", "/c", "start", "claude"]
+                        + _permission_argv(permission_mode) + [prompt],
                         cwd=cwd, env=_child_env(spawn_token))
     else:
-        _tmux_spawn(cwd, [_claude_bin(), "--dangerously-skip-permissions", prompt],
-                    env_token=spawn_token)
+        _tmux_spawn(cwd, [_claude_bin()] + _permission_argv(permission_mode)
+                    + [prompt], env_token=spawn_token)
 
 
-def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None):
-    """Resume an existing CC session by id (for evoke). Same session_id restored.
-    `claude --resume <id> <prompt>` enters the REPL, processes the prompt, stays
-    alive. cwd MUST be the session's original cwd (T25): `claude --resume <sid>`
-    looks the session up WITHIN the current project (cwd-scoped, per-project
-    .jsonl under ~/.claude/projects/<encoded-cwd>/). Run from the kernel's cwd
-    (data/server/) it fails with "No conversation found with session ID: <sid>".
-    `--resume` restores the conversation, NOT the process cwd, so set cwd here
-    explicitly (Popen on Windows, -c on tmux)."""
+def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None,
+                    permission_mode: str = "bypass"):
+    """Resume an existing CC session by id (for evoke). Same session_id
+    restored. `claude --resume <id> <prompt>` enters the REPL, processes the
+    prompt, stays alive. cwd MUST be the session's original cwd (T25).
+    permission_mode (HP-10/D4): "bypass" default - resume of an established
+    session is not a new trust decision (R8); pass "standard" to override.
+    `--resume` restores the conversation, NOT the process cwd, so set cwd
+    here explicitly (Popen on Windows, -c on tmux)."""
     if os.name == "nt":
-        _detached_popen(["cmd", "/c", "start", "claude", "--resume", session_id,
-                         "--dangerously-skip-permissions", prompt],
+        _detached_popen(["cmd", "/c", "start", "claude", "--resume", session_id]
+                        + _permission_argv(permission_mode) + [prompt],
                         cwd=cwd, env=_child_env())
     else:
-        _tmux_spawn(cwd or "", [_claude_bin(), "--resume", session_id,
-                                "--dangerously-skip-permissions", prompt])
+        _tmux_spawn(cwd or "", [_claude_bin(), "--resume", session_id]
+                    + _permission_argv(permission_mode) + [prompt])
