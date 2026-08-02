@@ -1,13 +1,18 @@
-"""HP-04: token -> sid map; pending marker; claim idempotency; start-event binding."""
+"""HP-04: token -> sid map; pending marker; claim idempotency; start-event binding.
+HP-08: pending-spawn marker TTL (expired markers count as absent)."""
 import json
 import os
+import time
 
 
-def _write_pending(server, token):
+def _write_pending(server, token, created_ms=None):
     d = server.paths.PENDING_SPAWN_DIR
     os.makedirs(d, exist_ok=True)
+    marker = {"schema_version": 1, "spawn_token": token}
+    if created_ms is not None:
+        marker["created_at_ms"] = created_ms
     with open(os.path.join(d, token + ".json"), "w", encoding="utf-8") as f:
-        json.dump({"schema_version": 1, "spawn_token": token}, f)
+        json.dump(marker, f)
 
 
 def test_find_session_by_token(server):
@@ -88,3 +93,31 @@ def test_handle_start_no_token_no_binding(server):
           "cwd": "/tmp", "start_time": None}
     k._handle_start(ev, "s1")
     assert k.spawn_tokens == {}
+
+
+# ---------- HP-08: pending-spawn marker TTL ----------
+# A poisoned marker (kernel crash in the write-window: marker written, child
+# never spawned, no start event) must expire - otherwise same-token retries
+# never re-spawn (Wave-2 deferred minor).
+
+
+def test_has_pending_spawn_expired_marker(server):
+    ka = server.kernel_api
+    _write_pending(server, "t1", int((time.time() - 2 * 3600) * 1000))
+    assert ka.has_pending_spawn("t1") is False
+
+
+def test_claim_expired_marker_rejected(server):
+    ka = server.kernel_api
+    _write_pending(server, "t1", int((time.time() - 2 * 3600) * 1000))
+    assert ka.claim_pending_spawn({}, "t1", "s1") == \
+        {"claimed": False, "reason": "no pending spawn for token"}
+
+
+def test_spawn_after_expiry_writes_fresh_marker(server, monkeypatch):
+    ka = server.kernel_api
+    monkeypatch.setattr(server.spawn, "spawn_cc_new", lambda *a, **kw: None)
+    _write_pending(server, "t1", int((time.time() - 2 * 3600) * 1000))
+    assert ka.has_pending_spawn("t1") is False
+    ka.spawn_cc_new("/tmp", "prompt", spawn_token="t1")
+    assert ka.has_pending_spawn("t1") is True  # fresh marker replaced the stale one

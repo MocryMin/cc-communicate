@@ -26,6 +26,7 @@ import shutil
 import time
 
 from paths import CONVERSATIONS_DIR, SERVER_DATA_DIR, PLUGIN_ROOT, ACK_TIMESTAMPS_FILE, MESSAGE_SEQUENCE_FILE, CURSORS_FILE, PENDING_SPAWN_DIR
+import cleanup
 import proc
 import conversations
 import fileutil
@@ -283,12 +284,18 @@ def find_session_by_token(spawn_tokens: dict, token: str):
 
 
 def has_pending_spawn(token: str) -> bool:
-    return os.path.isfile(os.path.join(PENDING_SPAWN_DIR, token + ".json"))
+    """HP-08: a marker older than the TTL counts as ABSENT (poisoned-marker
+    un-poisoning; the expired file itself is removed by the GC sweep)."""
+    path = os.path.join(PENDING_SPAWN_DIR, token + ".json")
+    if not os.path.isfile(path):
+        return False
+    return not cleanup.pending_marker_expired(path)
 
 
 def claim_pending_spawn(spawn_tokens: dict, token: str, session_id: str) -> dict:
     """Plan B: the spawned worker claims its token on its first tool call.
-    Idempotent: an existing binding is kept (worker retries are no-ops)."""
+    Idempotent: an existing binding is kept (worker retries are no-ops).
+    HP-08: an expired marker is treated as absent (same result as missing)."""
     validation.validate_spawn_token(token)
     validation.validate_session_id(session_id)
     existing = spawn_tokens.get(token)
