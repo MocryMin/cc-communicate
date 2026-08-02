@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Local development marketplace for the cc-communicate plugin (v2: WSL2 cross-realm)",
-    "version": "0.4.0"
+    "version": "0.4.1"
   },
   "plugins": [
     {
       "name": "cc-communicate",
       "source": "./cc-communicate",
       "description": "P2P communication between Claude Code sessions (incl. Windows host <-> WSL2 cross-realm): session registry via hooks, message pipes, listen, connect, evoke, create_collaborator. Exposes 20 MCP tools.",
-      "version": "0.4.0"
+      "version": "0.4.1"
     }
   ]
 }

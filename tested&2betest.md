@@ -1231,3 +1231,51 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   (manifest now matches the tag); ready for final ACCEPTED.
 - **Confidence**: high — every RAR locked by a regression test; the manifest fix verified through the
   real plugin CLI (not just the test).
+
+### T52 — Re-acceptance round 3: FR-01/02 (release packaging, code ACCEPTED)
+
+- **Context**: third-round review
+  (`docs/superpowers/reviews/2026-08-03-hardening-reacceptance-round3-review.md`) verdict:
+  **Runtime code `ACCEPTED`; installable release packaging `REVISE_REQUESTED_RELEASE_ONLY`** — two
+  release items only, no runtime/protocol changes required.
+- **FR-01 (P0, release gate)**: (a) README's clean-checkout steps lacked the server runtime deps
+  install — `.mcp.json` launches system `python` directly, so a clean env would fail to start the MCP
+  server; (b) the T51 smoke (`claude plugin validate`/`details`) proved metadata resolvable, NOT that
+  the plugin loads. Fixes: README now has a step-0 "install into the SAME interpreter `.mcp.json`
+  resolves" (verified in this env: CC resolves `python` -> `AppData\Local\Python\bin\python.exe`
+  (pythoncore 3.14); git-bash's `python` hits the Microsoft Store stub — the README's verification
+  command + stub note cover exactly that) + the verification command. **Real load smoke** (3 workers):
+  script-import coordinator + real spawned CCs (bypass) — each called `my_session_id` through its MCP
+  server and confirmed "cc-communicate MCP server CONNECTED and fully functional".
+  - Worker 1b4283f7 (initial spawn; coordinator crashed before connect — rerun with same token
+    reused the worker, no second window):
+    `spawn_collaborator -> ok (WorkerHandle, permission_mode=bypass)`; `check_alive = 1`.
+  - Worker 4a113f12 (fr01-tok-0001): `connect -> ok (correlation-matched reply)`; send ok
+    (message_id a1da4416539b4b1b9dcae6c799b5a746); worker report:
+    `"FR-01 report: my_session_id returned sid=4a113f12-9309-4806-b058-3a0692ccda21 (exact, from the
+    first tool call). cc-communicate MCP server: CONNECTED and fully functional in this session -
+    my_session_id, claim_pending_spawn, listen, and send_message all succeeded with ok=true."`
+    final check_alive = 1; close_connection ok.
+  - Worker 09571d6b (fr01-tok-0002, FINAL state after registry update to 0.4.1): MCP server process
+    pid 1624 cmdline = `python -u .../v2_win/cc-communicate/server/mcp_server.py` ->
+    **LOAD SOURCE = v2_win canonical** (NOT the cache snapshot; the directory-source marketplace
+    resolves the plugin root to the canonical tree even after `claude plugin update`); worker report:
+    `"session_id=09571d6b-4569-455b-aab3-5b3ee9367b5b. cc-communicate MCP server CONNECTED and fully
+    functional: my_session_id OK, claim_pending_spawn claimed=True, listen OK (delivered hello + this
+    request), send_message OK (hello-ack sent)."` PROBE: PASS.
+- **FR-02 (P1, immutable identity)**: the moved v0.4.0 tag violates build-identity immutability.
+  Fix: v0.4.0 left at `421a25e` forever; NEW immutable release **v0.4.1**: plugin.json +
+  marketplace.json (win + wsl twins) -> `0.4.1`; drift gate `RELEASE_VERSION = "0.4.1"`;
+  `claude plugin update cc-communicate@cc-communicate-local` refreshed the registry ->
+  `claude plugin list` and `claude plugin details` both report `0.4.1 / Exposes 20 MCP tools`;
+  new annotated tag v0.4.1 created once on the final commit.
+- **Report cleanup**: §4.1/§9.2 enumeration fixed (manifest gate 3 + marketplace twin 1 = 7, the
+  "gate 4 + twin 1" double-count inflated the literal sum); round-2 response (reviewer's cited
+  filename `2026-08-03-reacceptance-round2-response.md`) + round-3 review + smoke evidence committed;
+  report stays ACCEPTED-pending until the reviewer signs off.
+- **Auto gate**: T0 syntax PASS (44 .py + 2 .js) / T1 pytest PASS (227 passed) /
+  T2 parity PASS (32) / T2 artifacts PASS (33, templates pinned) / **GATE: PASS** (version gate
+  updated to 0.4.1 and green).
+- **Result**: PASS — FR-01/02 DONE; v0.4.1 tagged on the final commit; 5 final gates ready.
+- **Confidence**: high — the load smoke is a real CC session calling through its actual MCP server
+  (not metadata); the load-source probe captured the worker's MCP server process cmdline directly.

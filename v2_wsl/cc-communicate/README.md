@@ -4,27 +4,41 @@ A p2p transport for Claude Code sessions: message pipes, connection lifecycle
 (connect/listen/close), structured envelopes, and spawn/revive of collaborator
 sessions — same machine or Windows-host ↔ WSL2.
 
-## Install / load (the single authoritative path, RAR-03)
+## Install / load (the single authoritative path, RAR-03 / FR-01)
 
 This canonical tree IS the installable artifact (a directory-source
 marketplace; `v2_wsl/` is the generated WSL twin). From a clean checkout:
 
 ```bash
+# 0. install the SERVER runtime deps into the SAME interpreter that the
+#    plugin's .mcp.json launches (system `python` on Windows / `python3`
+#    on WSL - nothing else; the plugin does NOT bundle a venv). Run this
+#    from the same environment that launches Claude Code, and verify with
+#    the check below - if your shell's `python` is a Microsoft Store stub
+#    ("Python was not found", common in git-bash), use the full path of the
+#    interpreter Claude Code actually resolves instead (e.g. `py -3 -m pip
+#    install ...` or `C:\Users\...\Python\bin\python.exe -m pip install ...`).
+python -m pip install -r v2_win/cc-communicate/server/requirements.txt
+#    verify the interpreter is the one .mcp.json will use:
+python -c "import mcp, psutil, filelock; print('deps ok')"
 # 1. register the canonical tree as a local marketplace (name from
 #    .claude-plugin/marketplace.json = "cc-communicate-local")
 claude plugin marketplace add "C:\path\to\cc-communicate\v2_win"
 # 2. install the plugin
 claude plugin install cc-communicate@cc-communicate-local
 # 3. verify the loaded build identity + tool count
-claude plugin list        # cc-communicate ... Version: 0.4.0 ... enabled
+claude plugin list        # cc-communicate ... Version: 0.4.1 ... enabled
 claude plugin details cc-communicate@cc-communicate-local   # Exposes 20 MCP tools
 ```
 
-The plugin's `.mcp.json` launches `server/mcp_server.py` (20 FastMCP tools)
-via `${CLAUDE_PLUGIN_ROOT}`; in any session with the plugin enabled,
-`my_session_id` answering your sid is the load smoke test. WSL2 deployments
-use the GENERATED `v2_wsl/` tree the same way (`claude plugin marketplace
-add "C:\path\to\cc-communicate\v2_wsl"`). The repo-root
+**Load smoke**: the plugin's `.mcp.json` launches `server/mcp_server.py`
+(20 FastMCP tools) via `${CLAUDE_PLUGIN_ROOT}`. In a NEW Claude Code session
+with the plugin enabled, call `my_session_id` — a structured `ok` returning
+your sid proves the MCP server started and connected (a metadata-only
+`validate`/`details` check does NOT). WSL2 deployments use the GENERATED
+`v2_wsl/` tree the same way (`python3 -m pip install -r
+v2_wsl/cc-communicate/server/requirements.txt`, then `claude plugin
+marketplace add "C:\path\to\cc-communicate\v2_wsl"`). The repo-root
 `cc-communicate-marketplace/` is **historical only — do not install from it**
 (AR-05).
 

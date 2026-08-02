@@ -18,7 +18,10 @@ PLUGIN_JSON = WIN / "cc-communicate" / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = WIN / ".claude-plugin" / "marketplace.json"
 MCP_SERVER = WIN / "cc-communicate" / "server" / "mcp_server.py"
 
-RELEASE_VERSION = "0.4.0"
+# FR-02: the release identity is IMMUTABLE - each release gets a NEW version,
+# never a moved tag. Bump here (and the git tag) on every release; the drift
+# gate is exactly what catches a manifest/tag mismatch.
+RELEASE_VERSION = "0.4.1"
 TOOL_COUNT = 20
 
 

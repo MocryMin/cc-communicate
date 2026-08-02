@@ -15,7 +15,7 @@
 | 指标 | 数值 |
 |---|---|
 | 执行周期 | 2026-07-24 ~ 2026-08-03（10 天） |
-| 起点 → 终点 | v0.3.0 (`c114aa1`) → `a8927a0`（tag `v0.4.0`）+ 修订 commit（`8be326f` 说明、二轮 RAR 修订） |
+| 起点 → 终点 | v0.3.0 (`c114aa1`) → 三轮修订交付 commit（tag **`v0.4.1`**；`a8927a0`/`421a25e` 为前两轮修订，`v0.4.0` tag 保留为历史） |
 | Commits | 92（至二轮修订交付 commit） |
 | 自动化测试 | 0 → **227**（从零建立） |
 | Server 模块 | 22 个 `.py` + 2 个 `.js` |
@@ -243,7 +243,7 @@ GATE: PASS
 ```
 
 - **T0 语法**：两棵树的 44 个 `.py`（ast.parse）+ 2 个 `.js`（node --check）全部通过。
-- **T1 pytest**：227 个测试全部通过（204 基线 + AR-01~03/N-01~03 新增 16 + RAR 新增 7：MCP 依赖门 3、传输故障注入 7、known_pids 4、close_connection degraded 1、gate stderr 1、cursor 组合 1、recency 2、manifest gate 4、marketplace twin 1；unit + parity + tooling）。
+- **T1 pytest**：227 个测试全部通过（204 基线 + AR-01~03/N-01~03 新增 16 + RAR 新增 7：MCP 依赖门 3、传输故障注入 7、known_pids 4、close_connection degraded 1、gate stderr 1、cursor 组合 1、recency 2、manifest gate 3、marketplace twin 1；unit + parity + tooling）。
 - **T2 parity**：v2_win ↔ v2_wsl 在 allowlist 之外字节一致（32 文件）。
 - **T2 artifacts**：committed v2_wsl == generator 输出（33 文件，含 `.mcp.json` 模板 pin）。
 
@@ -340,13 +340,13 @@ canonical 树上的 generate 操作是 0-diff——committed artifact 已与 gen
 | `.mcp.json` 平台入口 | ✅ 正确（win: `python` / wsl: `python3`，install entry `${CLAUDE_PLUGIN_ROOT}/server/mcp_server.py` 不变） |
 | `.gitattributes` LF pinning | ✅ v2 trees + templates pin 到 LF（autocrlf=true 防御） |
 | `cc-communicate-marketplace/` | ✅ **AR-05 处置**：README 顶部已标记"历史参考，不支持安装"；权威实现为 `v2_win/` + `v2_wsl/`（`tools/build_artifacts.py generate` 生成），该树不再同步 |
-| 版本 tag | v0.3.0（`c114aa1`）→ **v0.4.0（本次交付 commit，2026-08-03）**：加固完成 + AR-01~06 修复 |
+| 版本 tag | v0.3.0（`c114aa1`）→ **v0.4.1（三轮修订交付 commit，2026-08-03，FR-02）**：加固完成 + AR-01~06 + RAR-01~04 + FR-01/02。`v0.4.0`（`421a25e`）保留为历史 tag，不再移动（不可变发布身份） |
 
 ---
 
 ## 8. 结论
 
-cc-communicate 加固程序完成；两轮验收修订（AR-01~06 + N-01~03，及二轮 RAR-01~04）处置完成。14 条提案中 13 条已实现并通过自动化 gate（227 测试 + parity 32 + artifacts 33）、7 个 live gate（L2 以 `DEGRADED (T46)` 交付，见 §3.7）和 4 轮外部审核 + 2 轮验收审核。1 条（HP-12 可观测性）为 `DEFERRED（分阶段接受，AR-06）`，H1 期间有明确替代观测面，重启条件已定义（见 §2）。按审核方流程，**最终 `ACCEPTED` 判定待第三轮重验收**（§9.2 的 6 条门）。
+cc-communicate 加固程序完成；三轮验收修订（AR-01~06 + N-01~03、RAR-01~04、FR-01~02）处置完成。14 条提案中 13 条已实现并通过自动化 gate（227 测试 + parity 32 + artifacts 33）、7 个 live gate（L2 以 `DEGRADED (T46)` 交付，见 §3.7）和 4 轮外部审核 + 3 轮验收审核。1 条（HP-12 可观测性）为 `DEFERRED（分阶段接受，AR-06）`，H1 期间有明确替代观测面，重启条件已定义（见 §2）。第三轮审核方判定：**Runtime 代码 `ACCEPTED`；发布封装 `REVISE_REQUESTED_RELEASE_ONLY`**（FR-01/02 处置见 §9.3），**最终 `ACCEPTED` 判定待审核方核验 FR-01/02**。
 
 **交付语义**：`at-least-once delivery + per-store ordering + detectable duplicates + idempotent mutation`——已兑现并验证。
 
@@ -396,7 +396,19 @@ cc-communicate 加固程序完成；两轮验收修订（AR-01~06 + N-01~03，�
 
 **第三轮最小重验收门对照**（审核方 §5，全部满足）：①`query_my_cursors → listen_v2` 降级时按文档直接组合且降级不丢（RAR-01 组合测试）；②`1..8 → 1(重观察) → 9` 顺序与 `check_alive` 回归测试含 replay（RAR-02）；③canonical manifest `0.4.0 / 20 tools`，win/wsl regenerate 后 parity/artifact gate 通过（RAR-03）；④README 给出并 smoke 验证唯一安装/加载路径（`claude plugin details` 0.4.0/20，RAR-03）；⑤报告 commit/测试数/分类/状态与仓库事实一致，response 与重验收审核进入交付 commit（RAR-04）；⑥原 220 项 + 新增 6 项全绿，T0/T1/T2 全 PASS。
 
-**测试数说明（二轮）**：227 = 220（一轮修订后）+ 7（RAR 新增：组合 1 + recency 2 + manifest gate 4 + marketplace twin 1）。
+**测试数说明（二轮）**：227 = 220（一轮修订后）+ 7（RAR 新增：组合 1 + recency 2 + manifest gate 3 + marketplace twin 1）。
+
+### 9.3 三轮修订处置（FR-01~02，发布封装，对应审核方 §3）
+
+第三轮重验收（`docs/superpowers/reviews/2026-08-03-hardening-reacceptance-round3-review.md`）判定：**Runtime 代码 `ACCEPTED`；可安装发布封装 `REVISE_REQUESTED_RELEASE_ONLY`**——不再要求修改消息协议/cursor/PID recency/Wave 1–4 架构，无需重跑 L1–L7。逐条处置如下：
+
+| # | 审核方修订项 | 处置 | 证据 |
+|---|---|---|---|
+| FR-01 (P0) | README clean-checkout 步骤缺 `server/requirements.txt` 安装（`.mcp.json` 直接调系统 `python`，干净环境缺依赖 MCP server 无法启动）；T51 smoke 只到 `validate/details`（元数据可见 ≠ 插件已加载） | README "Install / load" 节补齐**同解释器依赖安装步骤**（`python -m pip install -r v2_win/cc-communicate/server/requirements.txt` + `python -c "import mcp, psutil, filelock"` 验证；WSL 用 `python3`；注明 Microsoft Store stub 场景用 `py -3`/完整解释器路径）。**真实 load smoke**：script-import 协调器 + 真实 spawn 的 CC（permission_mode=bypass）→ worker 经其 MCP server 调 `my_session_id` 返回自身 sid，并确认 "cc-communicate MCP server CONNECTED and fully functional"（my_session_id/claim_pending_spawn/listen/send_message 全部 ok）；最终态探针（注册表 update 至 0.4.1 后）实证 worker MCP server 进程 cmdline 指向 **v2_win canonical**（非 cache 副本），加载源不漂移 | README.md；`tested&2betest.md` T52（原始输出）；worker sid 1b4283f7 / 4a113f12 / 09571d6b；探针 pid 1624 cmdline = `python -u .../v2_win/cc-communicate/server/mcp_server.py` |
+| FR-02 (P1) | 已推送 tag `v0.4.0` 被移动 → 不同消费者解析到不同代码，不符合不可混淆 build identity | **不再移动 `v0.4.0`**（保留在 `421a25e` 作历史记录）；发布身份提升为**新的不可变版本 `v0.4.1`**：plugin.json + marketplace.json（win/wsl twin）→ `0.4.1`；防漂移 gate `RELEASE_VERSION = "0.4.1"`（版本/工具数/source/twin 4 测试）；README 示例同步；`claude plugin update` 刷新注册表 → `claude plugin list`/`details` 均上报 `0.4.1 / Exposes 20 MCP tools`；新 annotated tag **`v0.4.1`** 一次性创建于最终交付 commit | 双 manifest；`tests/unit/test_plugin_manifest_gate.py`；`claude plugin list`/`details` 输出；tag v0.4.1 == 交付 commit |
+| 报告清理 | §4.1 新增测试枚举把 "manifest gate 4" 与 "marketplace twin 1" 重复列出（字面合计 8 ≠ 7）；二轮 response 未入库；ACCEPTED 前报告保持 pending | §4.1/§9.2 枚举更正为 "manifest gate 3 + marketplace twin 1"（合计 7）；`2026-08-03-reacceptance-round2-response.md`（审核方引用名）+ 本审核 + smoke 证据随交付 commit 入库；报告维持 "ACCEPTED pending" 直至审核方核验 | 本报告 §4.1/§9.2；git log 交付 commit |
+
+**最终验收门对照**（审核方 §5，全部满足）：①README 含同解释器运行依赖安装步骤（FR-01）；②隔离 clean-checkout 安装后真实 CC session `my_session_id` load smoke 通过（T52 原始输出：3 个 worker 全部 `my_session_id` ok + MCP CONNECTED）；③发布为不可变 `v0.4.1`，manifest/marketplace/details/tag 一致（FR-02）；④版本 gate 更新后 227 项基线 + T0/T1/T2 继续通过；⑤报告枚举修正，round-2 response + 本审核 + smoke 证据纳入最终 commit。
 
 ---
 
