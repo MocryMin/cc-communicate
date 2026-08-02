@@ -765,32 +765,36 @@ def _has_pending_spawn(token: str, machine: dict = None):
     return rpc_client.call_remote(machine, "has_pending_spawn", {"token": token})
 
 
-def _spawn_new(cwd: str, prompt: str, spawn_token: str, machine: dict = None):
+def _spawn_new(cwd: str, prompt: str, spawn_token: str, machine: dict = None,
+               permission_mode: str = "standard"):
+    args = {"cwd": cwd, "prompt": prompt, "spawn_token": spawn_token,
+            "permission_mode": permission_mode}
     if machine is None:
-        return rpc_client.call("spawn_cc_new",
-                               {"cwd": cwd, "prompt": prompt,
-                                "spawn_token": spawn_token})
-    return rpc_client.call_remote(machine, "spawn_cc_new",
-                                  {"cwd": cwd, "prompt": prompt,
-                                   "spawn_token": spawn_token})
+        return rpc_client.call("spawn_cc_new", args)
+    return rpc_client.call_remote(machine, "spawn_cc_new", args)
 
 
 def _worker_handle(session_id: str, spawn_token: str, cwd: str,
-                   machine: dict = None) -> dict:
+                   machine: dict = None, permission_mode: str = "standard") -> dict:
     machine_id = (machine or {}).get("id")
     if not machine_id:
         machine_id = machine_identity.load_or_create().get("id")
     return {"session_id": session_id, "machine_id": machine_id, "cwd": cwd,
-            "spawn_token": spawn_token, "connection_status": "registered"}
+            "spawn_token": spawn_token, "connection_status": "registered",
+            "permission_mode": permission_mode}
 
 
 def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
-                       machine: dict = None, hold_time: int = 300) -> dict:
+                       machine: dict = None, hold_time: int = 300,
+                       permission_mode: str = "standard") -> dict:
     """Spawn a NEW CC in cwd (on `machine` if given, else local), wait for it
     to register, and return a structured WorkerHandle - NO auto-connect (the
     caller decides when to call connect). spawn_token: caller-supplied (or
     server-generated, returned in the handle); a retry with the SAME token
-    returns the original handle instead of spawning again. HP-04."""
+    returns the original handle instead of spawning again. HP-04.
+    permission_mode (HP-10/D4): "standard" default - the spawned CC makes
+    normal permission decisions; pass "bypass" for unattended automation
+    (skips the trust dialog)."""
     token = spawn_token or uuid.uuid4().hex
     # same-token retry: already registered -> original handle
     try:
@@ -798,7 +802,8 @@ def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
     except KernelError as e:
         return _kernel_err(e)
     if sid:
-        return _ok(_worker_handle(sid, token, cwd, machine))
+        return _ok(_worker_handle(sid, token, cwd, machine,
+                                  permission_mode=permission_mode))
     # in-flight (pending marker) -> don't re-spawn
     try:
         pending = _has_pending_spawn(token, machine)
@@ -808,7 +813,8 @@ def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
         return _remote_err()
     if not pending:
         try:
-            r = _spawn_new(cwd, _spawn_prompt(token), token, machine)
+            r = _spawn_new(cwd, _spawn_prompt(token), token, machine,
+                           permission_mode)
         except KernelError as e:
             return _kernel_err(e)
         if r is None:
@@ -828,7 +834,8 @@ def spawn_collaborator(caller_sid: str, cwd: str, spawn_token: str = None,
         return _err(Code.TIMEOUT,
                     "new session did not register within 30s (is the plugin "
                     "installed for new CCs?)", retryable=True)
-    return _ok(_worker_handle(sid, token, cwd, machine))
+    return _ok(_worker_handle(sid, token, cwd, machine,
+                              permission_mode=permission_mode))
 
 
 def claim_pending_spawn(spawn_token: str, session_id: str) -> dict:

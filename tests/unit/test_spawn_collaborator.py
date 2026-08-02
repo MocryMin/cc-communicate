@@ -30,9 +30,11 @@ def test_spawn_collaborator_handle(server, monkeypatch):
     monkeypatch.setattr(user_functions, "_has_pending_spawn",
                         lambda tok, machine=None: False)
     monkeypatch.setattr(user_functions, "_spawn_new",
-                        lambda cwd, prompt, tok, machine=None: {"spawned": True})
+                        lambda cwd, prompt, tok, machine=None,
+                        permission_mode="standard": {"spawned": True})
     monkeypatch.setattr(user_functions, "_worker_handle",
-                        lambda sid, tok, cwd, machine=None:
+                        lambda sid, tok, cwd, machine=None,
+                        permission_mode="standard":
                         {"session_id": sid, "machine_id": "m1", "cwd": cwd,
                          "spawn_token": tok, "connection_status": "registered"})
     # find resolves on the second poll
@@ -63,7 +65,8 @@ def test_spawn_collaborator_same_token_retry_no_respawn(server, monkeypatch):
     monkeypatch.setattr(user_functions, "_spawn_new",
                         lambda *a, **k: spawned.append(a))
     monkeypatch.setattr(user_functions, "_worker_handle",
-                        lambda sid, tok, cwd, machine=None:
+                        lambda sid, tok, cwd, machine=None,
+                        permission_mode="standard":
                         {"session_id": sid, "machine_id": "m1", "cwd": cwd,
                          "spawn_token": tok, "connection_status": "registered"})
     r = user_functions.spawn_collaborator("caller", "/tmp", spawn_token="t1")

@@ -74,3 +74,34 @@ def test_dispatch_spawn_cc_resume_permission_mode(server, monkeypatch):
                         calls.update(mode=permission_mode))
     k._dispatch("spawn_cc_resume", {"session_id": "s1", "prompt": "p"})
     assert calls["mode"] == "bypass"             # resume default (D4-b)
+
+
+def test_mcp_spawn_collaborator_default_standard(server, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(user_functions, "spawn_collaborator",
+                        lambda *a, **k: captured.update(kwargs=k) or {
+                            "ok": True, "code": None, "message": None,
+                            "data": {"session_id": "s1"},
+                            "retryable": False})
+    r = mcp_server.spawn_collaborator("caller", str(server.paths.DATA_DIR))
+    assert r["ok"] is True
+    assert captured["kwargs"]["permission_mode"] == "standard"   # D4 flip
+    mcp_server.spawn_collaborator("caller", str(server.paths.DATA_DIR),
+                                  permission_mode="bypass")
+    assert captured["kwargs"]["permission_mode"] == "bypass"
+
+
+def test_mcp_spawn_collaborator_bad_mode_rejected(server):
+    r = mcp_server.spawn_collaborator("caller", str(server.paths.DATA_DIR),
+                                      permission_mode="root")
+    assert r["ok"] is False and r["code"] == Code.INVALID_ARGUMENT
+
+
+def test_worker_handle_carries_permission_mode(server):
+    server.paths.ensure_runtime_dirs()
+    h = user_functions._worker_handle("s1", "t1", "/tmp", None,
+                                      permission_mode="bypass")
+    assert h["permission_mode"] == "bypass"
+    h2 = user_functions._worker_handle("s1", "t1", "/tmp", None,
+                                       permission_mode="standard")
+    assert h2["permission_mode"] == "standard"
