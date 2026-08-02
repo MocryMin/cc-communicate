@@ -1107,3 +1107,25 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Next**: Wave 4 (HP-13-A canonical single source + generated win/wsl artifacts) — the reviewer confirms it is
   the last wave and that the protocol is stable enough (193 tests + 6 live gates) to absorb its HIGH risk.
 - **Confidence**: high for the audit outcome; dispositions are the reviewer's words mapped onto existing records.
+
+### T49 — Wave 4 acceptance: HP-13-A canonical source + generated artifacts (auto + live smoke gates)
+
+- **Auto gate**: T0 syntax PASS (44 .py + 2 .js), T1 pytest PASS (203), T2 parity PASS (32 files),
+  **T2 artifacts PASS (33 files, templates pinned)** — GATE: PASS (`py -3 tools/run_regression.py`).
+- **0-diff invariant**: `py -3 tools/build_artifacts.py generate` on the canonical v2_win tree produced
+  `GENERATED v2_wsl/cc-communicate (33 files)` and an EMPTY `git diff --stat v2_wsl` — the committed artifact
+  already matches generator output byte-for-byte.
+- **LF pinning**: repo `.gitattributes` pins `v2_win/**`, `v2_wsl/**`, `tools/artifact_templates/**` to
+  `text eol=lf` (CRLF hazard found in Task-2 review: core.autocrlf=true checkouts would write CRLF working
+  copies → byte gates fail while `git diff` shows nothing; renormalize was a no-op — blobs already LF).
+- **Live smoke gate (L7, driven from the session's real plugin on the canonical tree)**:
+  spawn_collaborator(w4-smoke-tok) → worker 8678a175, cwd == repo, WorkerHandle `permission_mode: standard`
+  (D4 live-confirmed) → correlated connect (reply matched w4-smoke-conn) → send 1 probe → worker ACKed the
+  exact message_id (d11d0abce21c4be483ab0cd323cd390d, store seq 122→123) → check_alive worker == 1 →
+  WSL peer 4cefe529 still registered, WSL session 2011c315 check_alive == 1 → cross-realm connect +
+  probe → routed reply through the host store with the exact message_id (fb5e115b9b094d42b866a16a9fb91173,
+  seq 127) → both connections closed clean.
+- **Result**: PASS — install entry + live behavior unchanged through the canonical tree; cross-realm install
+  path untouched. Wave 3's L1-L6 gates remain the standing protocol gates; this wave added L7 (smoke) to
+  the checklists.
+- **Confidence**: high — real CC worker, real WSL peer, real store records, auto gate re-run at exit.
