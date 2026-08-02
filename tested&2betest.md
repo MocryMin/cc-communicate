@@ -1071,3 +1071,20 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Action**: documented; re-test delivery-after-resume on a CC update or after investigating CC's resume↔MCP
   handshake. cc-communicate code untouched (no fix warranted without a reproducible cc-communicate-side cause).
 - **Confidence**: high for the environment attribution; the exact CC-internal mechanism unverified.
+
+### T47 — Wave 3 exit live gate L3 (cross-realm host↔WSL cursors, kimi-k3-mandated) PASS
+
+- **Method**: real WSL2 (VS Code session, Ubuntu, peer id 4cefe529 registered since 2026-07-31). Synced the
+  Wave-3 v2_wsl code to the WSL deployment (/home/mocry/projects/v2_wsl/cc-communicate; server/scripts/skills/
+  .mcp.json, data/ untouched) via the //wsl.localhost 9P share; WSL kernel restarted (kernel.log: new-code start
+  at 2026-08-03 01:56:57 WITH the HP-08 start-GC sweep line). Spawned the WSL worker via host-side
+  call_remote(spawn_cc_new) -> tmux; registered 2s (2011c315-d0a3-4fcd-9c4a-47c8cb9476a2, token lgw1-tok).
+  Flow: host A('livegate-coordinator') -> register pair (host store) -> sent 3 (seq 115-117); the real WSL CC
+  acked all 3 through the routed host store in 12s (pipe drained, log archived - zero loss); B->A direction: 2
+  replies routed to the host store; A listen_v2 cursor=0 -> 2 replies, re-listen same cursor -> 0 (no
+  re-delivery); cursor maps: A's keys ONLY the host store (60ca2608), the WSL kernel's cursor state empty - no
+  cross-store bleed.
+- **Result**: PASS - cross-realm spawn/registration, delivery both directions, per-store cursor independence,
+  zero loss/dup. Auto gate GATE PASS (193 tests, parity OK 32 files) unchanged.
+- **Confidence**: high - real WSL CC, real cross-machine RPC (call_remote + routed store), per-kernel cursor
+  state verified on both sides.
