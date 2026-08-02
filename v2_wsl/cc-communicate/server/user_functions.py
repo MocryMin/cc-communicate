@@ -383,6 +383,11 @@ def send_message(fromid: str, toid: str, message: str,
         return _remote_err()
     if r.get("sent"):
         return _ok({"message_id": r.get("message_id"), "ts": r.get("ts")})
+    if r.get("backlog") is not None:
+        # HP-09: peer hasn't acked enough - retry after it drains
+        return _err(Code.RESOURCE_EXHAUSTED,
+                    r.get("reason", "backlog full"),
+                    data=r.get("backlog"), retryable=True)
     return _err(Code.NOT_FOUND, r.get("reason", "send failed"))
 
 

@@ -33,3 +33,55 @@ def test_validate_message_size_non_str_still_invalid(server):
     v = server.validation
     with pytest.raises(v.InvalidArgumentError):
         v.validate_message_size(42)
+
+
+# ---------- HP-09: backpressure (per-pair unacked cap) ----------
+
+def test_send_backlog_cap_blocks(server):
+    ka = server.kernel_api
+    server.paths.ensure_runtime_dirs()
+    k = server.kernel
+    ka.MAX_BACKLOG = 0
+    k.alive_conversations[("a", "b")] = {"established_at": 1.0}
+    r = ka.send_message(k.alive_conversations, {}, "store", "a", "b", "hi")
+    assert r == {"sent": False, "reason": "backlog full",
+                 "backlog": {"unacked": 0, "cap": 0}}
+
+
+def test_send_backlog_cap_releases_after_drain(server):
+    ka = server.kernel_api
+    server.paths.ensure_runtime_dirs()
+    k = server.kernel
+    ka.MAX_BACKLOG = 1
+    k.alive_conversations[("a", "b")] = {"established_at": 1.0}
+    r1 = ka.send_message(k.alive_conversations, {}, "store", "a", "b", "m1")
+    assert r1["sent"] is True                      # pipe 0 -> 1 (exactly at cap)
+    r2 = ka.send_message(k.alive_conversations, {}, "store", "a", "b", "m2")
+    assert r2["sent"] is False and r2["backlog"]["unacked"] == 1
+    # drain: bob confirms -> listen_scan archives what he's acked
+    res = ka.listen_scan({}, "b", r1["ts"])
+    assert res["messages"] == []                  # archived, not re-delivered
+    r3 = ka.send_message(k.alive_conversations, {}, "store", "a", "b", "m3")
+    assert r3["sent"] is True                     # backpressure released
+
+
+def test_user_functions_backlog_maps_to_resource_exhausted(server, monkeypatch):
+    import user_functions
+    monkeypatch.setattr(user_functions, "_conv_store", lambda toid: None)
+    monkeypatch.setattr(user_functions, "_send", lambda *a, **kw: {
+        "sent": False, "reason": "backlog full",
+        "backlog": {"unacked": 1000, "cap": 1000}})
+    r = user_functions.send_message("a", "b", "hi")
+    assert r["ok"] is False and r["code"] == Code.RESOURCE_EXHAUSTED
+    assert r["retryable"] is True
+    assert r["data"] == {"unacked": 1000, "cap": 1000}
+
+
+def test_user_functions_not_registered_still_not_found(server, monkeypatch):
+    import user_functions
+    monkeypatch.setattr(user_functions, "_conv_store", lambda toid: None)
+    monkeypatch.setattr(user_functions, "_send", lambda *a, **kw: {
+        "sent": False, "reason": "connection not registered"})
+    r = user_functions.send_message("a", "b", "hi")
+    assert r["ok"] is False and r["code"] == Code.NOT_FOUND
+    assert r["retryable"] is False

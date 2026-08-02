@@ -34,6 +34,10 @@ import message_record
 import spawn
 import validation
 
+# HP-09 (D5): per-pair unacked pipe cap - when the receiver's pipe holds this
+# many undelivered messages, further sends are rejected (backpressure).
+MAX_BACKLOG = int(os.environ.get("CC_COMMUNICATE_MAX_BACKLOG", "1000"))
+
 
 def _atomic_write_json(path: str, obj):
     fileutil.atomic_write_json(path, obj)
@@ -114,6 +118,18 @@ def send_message(alive_conversations: dict, message_sequence: dict, store_id: st
             ts = rec.get("created_at_ms", 0) if rec else 0
             return {"sent": True, "message_id": message_id, "ts": ts,
                     "correlation_id": rec.get("correlation_id") if rec else None}
+    # HP-09: backpressure - everything in pipe/ is unacked by definition.
+    # Check BEFORE publish; single-threaded kernel => exact cap (each send
+    # re-scans after the previous publish).
+    pipe_dir = os.path.join(d, "pipe")
+    try:
+        unacked = len([n for n in os.listdir(pipe_dir)
+                       if n.endswith((".json", ".md"))])
+    except FileNotFoundError:
+        unacked = 0
+    if unacked >= MAX_BACKLOG:
+        return {"sent": False, "reason": "backlog full",
+                "backlog": {"unacked": unacked, "cap": MAX_BACKLOG}}
     seq = int(message_sequence.get("last_allocated", 0)) + 1
     message_sequence["last_allocated"] = seq
     message_sequence["store_id"] = store_id
