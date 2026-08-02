@@ -28,7 +28,7 @@ def server(tmp_path, monkeypatch):
     monkeypatch.setenv("CC_COMMUNICATE_DATA_DIR", str(tmp_path))
     mods = {}
     for name in ("paths", "result", "validation", "proc", "conversations",
-                 "spawn", "cleanup", "machine_identity", "check_core", "rpc_client",
-                 "kernel_api", "kernel"):
+                 "spawn", "cleanup", "schema", "machine_identity", "check_core",
+                 "rpc_client", "kernel_api", "kernel"):
         mods[name] = importlib.reload(importlib.import_module(name))
     return SimpleNamespace(data_root=tmp_path, **mods)
