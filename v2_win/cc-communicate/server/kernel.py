@@ -380,19 +380,22 @@ _ARG_VALIDATORS = {
     "withdraw": {"fromid": validation.validate_session_id,
                  "toid": validation.validate_session_id,
                  "message_id": validation.validate_message_id},
-    "evoke": {"session_id": validation.validate_session_id},
+    "evoke": {"session_id": validation.validate_session_id,
+              "permission_mode": validation.validate_permission_mode},
     "collect_messages": {"session_id": validation.validate_session_id},
     "listen_scan": {"sid": validation.validate_session_id},
     "query_ack_timestamp": {"sid": validation.validate_session_id},
     "upload_ack_timestamp": {"sid": validation.validate_session_id},
     "spawn_cc_new": {"cwd": validation.validate_cwd,
-                     "spawn_token": validation.validate_spawn_token},
+                     "spawn_token": validation.validate_spawn_token,
+                     "permission_mode": validation.validate_permission_mode},
     "find_session_by_token": {"token": validation.validate_spawn_token},
     "has_pending_spawn": {"token": validation.validate_spawn_token},
     "claim_pending_spawn": {"token": validation.validate_spawn_token,
                             "session_id": validation.validate_session_id},
     "spawn_cc_resume": {"session_id": validation.validate_session_id,
-                        "cwd": validation.validate_cwd},
+                        "cwd": validation.validate_cwd,
+                        "permission_mode": validation.validate_permission_mode},
     "create_conversation_folder": {"id1": validation.validate_session_id,
                                    "id2": validation.validate_session_id},
     "activate_connection": {"connection_id": validation.validate_connection_id},
@@ -439,7 +442,8 @@ def _dispatch(function: str, args: dict):
     if function == "withdraw":
         return kernel_api.withdraw(alive_conversations, args["fromid"], args["toid"], args.get("init_connect", 0), args.get("message_id"))
     if function == "evoke":
-        return kernel_api.evoke(sessions, args["session_id"])
+        return kernel_api.evoke(sessions, args["session_id"],
+                                args.get("permission_mode", "bypass"))
     if function == "collect_messages":
         return kernel_api.collect_messages(args["session_id"])
     if function == "listen_scan":
@@ -461,7 +465,9 @@ def _dispatch(function: str, args: dict):
     if function == "find_new_session":
         return kernel_api.find_new_session(sessions, args["cwd"], args.get("since_ts", 0))
     if function == "spawn_cc_new":
-        return kernel_api.spawn_cc_new(args["cwd"], args["prompt"], args.get("spawn_token"))
+        return kernel_api.spawn_cc_new(args["cwd"], args["prompt"],
+                                       args.get("spawn_token"),
+                                       args.get("permission_mode", "standard"))
     if function == "find_session_by_token":
         return kernel_api.find_session_by_token(spawn_tokens, args["token"])
     if function == "has_pending_spawn":
@@ -469,7 +475,9 @@ def _dispatch(function: str, args: dict):
     if function == "claim_pending_spawn":
         return kernel_api.claim_pending_spawn(spawn_tokens, args["token"], args["session_id"])
     if function == "spawn_cc_resume":
-        return kernel_api.spawn_cc_resume(args["session_id"], args["prompt"], args.get("cwd"))
+        return kernel_api.spawn_cc_resume(args["session_id"], args["prompt"],
+                                          args.get("cwd"),
+                                          args.get("permission_mode", "bypass"))
     if function == "create_conversation_folder":
         return kernel_api.create_conversation_folder(args["id1"], args["id2"])
     if function == "kernel_terminate":

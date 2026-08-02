@@ -56,7 +56,8 @@ def test_spawn_cc_new_writes_pending_and_token(server, monkeypatch):
     ka = server.kernel_api
     spawned = {}
     monkeypatch.setattr(server.spawn, "spawn_cc_new",
-                        lambda cwd, prompt, spawn_token=None:
+                        lambda cwd, prompt, spawn_token=None,
+                        permission_mode="standard":
                         spawned.update(cwd=cwd, token=spawn_token))
     r = ka.spawn_cc_new("/tmp", "prompt", spawn_token="t1")
     assert r == {"spawned": True, "spawn_token": "t1"}

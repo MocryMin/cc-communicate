@@ -21,6 +21,7 @@ Implemented:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import time
@@ -33,6 +34,8 @@ import fileutil
 import message_record
 import spawn
 import validation
+
+log = logging.getLogger("cc-communicate.kernel")
 
 # HP-09 (D5): per-pair unacked pipe cap - when the receiver's pipe holds this
 # many undelivered messages, further sends are rejected (backpressure).
@@ -238,12 +241,16 @@ def withdraw(alive_conversations: dict, fromid: str, toid: str, init_connect: in
 
 # ---------- process spawning ----------
 
-def evoke(sessions: dict, session_id: str, prompt: str = None) -> dict:
+def evoke(sessions: dict, session_id: str, prompt: str = None,
+          permission_mode: str = "bypass") -> dict:
     """Revive a CC session by resuming it (core_plan "内核函数 5"). Uses
     `claude --resume <sid> <prompt>` so the SAME session_id is revived. The
     revived CC fires SessionStart -> process_session_ctrl_event updates
-    alive_sessions with the new pid. Returns {'evoked': True, 'session_id'}
-    or {'evoked': False, 'reason': 'session unknown'}."""
+    alive_sessions with the new pid. HP-10 (D4): resume defaults to
+    permission_mode="bypass" - resuming an established session is not a new
+    trust decision (R8); pass "standard" to override. Returns
+    {'evoked': True, 'session_id'} or {'evoked': False, 'reason': 'session
+    unknown'}."""
     if session_id not in sessions:
         return {"evoked": False, "reason": "session unknown"}
     if prompt is None:
@@ -264,17 +271,20 @@ def evoke(sessions: dict, session_id: str, prompt: str = None) -> dict:
     # (per-project .jsonl lookup); without the right cwd it runs in the kernel's
     # cwd (data/server/) and fails "No conversation found with session ID: <sid>".
     cwd = sessions.get(session_id, {}).get("cwd")
-    spawn.spawn_cc_resume(session_id, prompt, cwd)
+    spawn.spawn_cc_resume(session_id, prompt, cwd, permission_mode)
     return {"evoked": True, "session_id": session_id}
 
 
-def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None) -> dict:
+def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None,
+                 permission_mode: str = "standard") -> dict:
     """Kernel function for (cross-machine) create_collaborator /
     spawn_collaborator (v2.1 §3.4.6): a peer MCP server calls this via
     call_remote so THIS kernel spawns a local CC (it knows its own claude path
     / spawn mechanism). HP-04: writes pending_spawn/<token>.json BEFORE
     spawning - the marker makes same-token retries safe (no double spawn) and
-    is the plan B claim record; the child gets the token via env (plan A)."""
+    is the plan B claim record; the child gets the token via env (plan A).
+    HP-10 (D4): permission_mode default "standard"; "bypass" is the explicit
+    unattended-automation opt-in (splices --dangerously-skip-permissions)."""
     if spawn_token:
         validation.validate_spawn_token(spawn_token)
         os.makedirs(PENDING_SPAWN_DIR, exist_ok=True)
@@ -282,12 +292,16 @@ def spawn_cc_new(cwd: str, prompt: str, spawn_token: str = None) -> dict:
             os.path.join(PENDING_SPAWN_DIR, spawn_token + ".json"),
             {"schema_version": 1, "spawn_token": spawn_token, "cwd": cwd,
              "created_at_ms": int(time.time() * 1000)})
-    spawn.spawn_cc_new(cwd, prompt, spawn_token)
+    if permission_mode == "bypass":
+        log.info("spawn_cc_new permission_mode=bypass (spawn_token=%s)",
+                 spawn_token)
+    spawn.spawn_cc_new(cwd, prompt, spawn_token, permission_mode)
     return {"spawned": True, "spawn_token": spawn_token}
 
 
-def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None) -> dict:
-    spawn.spawn_cc_resume(session_id, prompt, cwd)
+def spawn_cc_resume(session_id: str, prompt: str, cwd: str = None,
+                    permission_mode: str = "bypass") -> dict:
+    spawn.spawn_cc_resume(session_id, prompt, cwd, permission_mode)
     return {"spawned": True, "session_id": session_id}
 
 

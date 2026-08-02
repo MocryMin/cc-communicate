@@ -46,3 +46,31 @@ def test_spawn_cc_resume_default_bypass_has_flag(server, monkeypatch):
                         captured.update(cmd=cmd_args))
     server.spawn.spawn_cc_resume("s1", "prompt", "/tmp")
     assert "--dangerously-skip-permissions" in captured["cmd"]
+
+
+def test_dispatch_spawn_cc_new_permission_mode(server, monkeypatch):
+    k = server.kernel
+    calls = {}
+    monkeypatch.setattr(server.spawn, "spawn_cc_new",
+                        lambda cwd, prompt, spawn_token=None,
+                        permission_mode="standard":
+                        calls.update(mode=permission_mode))
+    k._dispatch("spawn_cc_new", {"cwd": str(server.paths.DATA_DIR),
+                                 "prompt": "p"})
+    assert calls["mode"] == "standard"           # D4 default
+    k._dispatch("spawn_cc_new", {"cwd": str(server.paths.DATA_DIR),
+                                 "prompt": "p", "permission_mode": "bypass"})
+    assert calls["mode"] == "bypass"
+    with pytest.raises(server.validation.InvalidArgumentError):
+        k._dispatch("spawn_cc_new", {"cwd": str(server.paths.DATA_DIR),
+                                     "prompt": "p", "permission_mode": "root"})
+
+
+def test_dispatch_spawn_cc_resume_permission_mode(server, monkeypatch):
+    k = server.kernel
+    calls = {}
+    monkeypatch.setattr(server.spawn, "spawn_cc_resume",
+                        lambda sid, prompt, cwd=None, permission_mode="bypass":
+                        calls.update(mode=permission_mode))
+    k._dispatch("spawn_cc_resume", {"session_id": "s1", "prompt": "p"})
+    assert calls["mode"] == "bypass"             # resume default (D4-b)
