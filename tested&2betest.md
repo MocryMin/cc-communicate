@@ -992,3 +992,20 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   gates (full L1-L6, incl. the mandated L3/L4) deferred to the Wave 3 exit
   gate per the user's locked decision.
 - **Confidence**: high for unit semantics; live verification at Wave 3 exit.
+
+### T43 — HP-10 unit acceptance: permission default flip (D4) + legacy marking + threat-model README
+
+- **Method**: unit (test_permission_mode.py): validate_permission_mode
+  matrix; spawn argv splicing (_permission_argv; spawn_cc_new default
+  standard has NO --dangerously-skip-permissions, bypass has it;
+  spawn_cc_resume default bypass); kernel dispatch routes permission_mode
+  (spawn_cc_new standard / resume+evoke bypass); mcp_server
+  spawn_collaborator default standard + pass-through + entry validation;
+  WorkerHandle carries permission_mode; evoke override param;
+  create_collaborator legacy suffix + explicit bypass; kernel log line for
+  bypass spawns (caplog). README.md (plugin root) ships the D4 threat model.
+  Full auto gate `py -3 tools/run_regression.py --tier auto` -> GATE PASS.
+- **Result**: PASS (unit + auto gate; parity OK). Live gates (full L1-L6,
+  incl. the mandated L3/L4) deferred to the Wave 3 exit gate per the user's
+  locked decision.
+- **Confidence**: high for unit semantics; live verification at Wave 3 exit.

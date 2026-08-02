@@ -128,16 +128,19 @@ more silent loss when a human interrupts mid-conversation.
    in `cwd` and returns a structured WorkerHandle (it does NOT auto-connect -
    call `connect` when you want the channel). Pass `machine=<entry>` (from
    `query_machines`) to spawn on a registered peer machine. The new CC must
-   have the plugin installed to be discoverable.
+   have the plugin installed to be discoverable. The worker runs in
+   `permission_mode="standard"` by default (HP-10/D4): it makes normal
+   permission decisions and a trust dialog may appear; pass
+   `permission_mode="bypass"` explicitly for unattended automation.
 
 ## Spawning a collaborator (the worker playbook)
 
-`spawn_collaborator(caller_sid, cwd, spawn_token=None, permission_mode="bypass",
+`spawn_collaborator(caller_sid, cwd, spawn_token=None, permission_mode="standard",
 machine=None, hold_time=300)` starts a new CC in `cwd` and waits for it to
 register (up to 30s). Returns the envelope with `data` = the WorkerHandle:
 
 ```
-{session_id, machine_id, cwd, spawn_token, connection_status}
+{session_id, machine_id, cwd, spawn_token, connection_status, permission_mode}
 ```
 
 - `connection_status` is `"registered"` once the worker is discoverable.
@@ -146,9 +149,11 @@ register (up to 30s). Returns the envelope with `data` = the WorkerHandle:
   a second CC (a pending marker prevents double-spawn even while the first
   is still booting). Omit it and the server generates one (returned in the
   handle).
-- `permission_mode` is accepted now (default `"bypass"` = current behavior;
-  Wave 3 HP-10 flips the default to `"standard"` - the parameter surface
-  never changes).
+- `permission_mode` (HP-10/D4): `"standard"` DEFAULT - the spawned CC makes
+  normal permission decisions (a trust dialog may appear; unattended
+  automation must pass `"bypass"` explicitly). The legacy
+  `create_collaborator` and the resume path (`evoke`) are bypass. Threat
+  model: see the plugin README.
 - Failure to register within 30s -> `err(TIMEOUT, retryable: true)`.
 
 The spawned worker is prompted to (and should) do this on its side:
@@ -216,18 +221,23 @@ listener - only use the listen/listen_v2 tool.
   preferred). `err(NOT_FOUND)` when there is nothing to withdraw.
 
 ### Spawning
-- `evoke(session_id) -> dict` - Revive a dead session on whatever machine it
-  lives on (local or remote peer). Same session_id resumed. `data` =
-  `{evoked: True, session_id}`; `err(NOT_FOUND)` when the session does not
-  exist. connect calls this automatically when the target is dead.
+- `evoke(session_id, permission_mode="bypass") -> dict` - Revive a dead
+  session on whatever machine it lives on (local or remote peer). Same
+  session_id resumed. `data` = `{evoked: True, session_id}`;
+  `err(NOT_FOUND)` when the session does not exist. connect calls this
+  automatically when the target is dead. `permission_mode` (HP-10/D4):
+  "bypass" default - resume of an established session is not a new trust
+  decision; pass "standard" to override.
 - `spawn_collaborator(caller_sid, cwd, spawn_token=None,
-  permission_mode="bypass", machine=None, hold_time=300) -> dict` - Spawn a
+  permission_mode="standard", machine=None, hold_time=300) -> dict` - Spawn a
   NEW CC in cwd (on `machine` if given - a `query_machines` entry - else
   this machine) and wait for it to register. `data` = WorkerHandle
-  `{session_id, machine_id, cwd, spawn_token, connection_status}`. Does NOT
-  auto-connect - call `connect` when you want the channel. Same-token
-  retries return the original handle (no second spawn). See "Spawning a
-  collaborator" above.
+  `{session_id, machine_id, cwd, spawn_token, connection_status,
+  permission_mode}`. Does NOT auto-connect - call `connect` when you want
+  the channel. Same-token retries return the original handle (no second
+  spawn). `permission_mode` (HP-10/D4): "standard" DEFAULT - the spawned CC
+  makes normal permission decisions; pass "bypass" explicitly for unattended
+  automation. See "Spawning a collaborator" above.
 - `claim_pending_spawn(spawn_token, session_id) -> dict` - Claim a pending
   spawn token (plan B, D8): a spawned worker calls this on its FIRST tool
   use so the spawner's registration poll can resolve. Idempotent - safe to
