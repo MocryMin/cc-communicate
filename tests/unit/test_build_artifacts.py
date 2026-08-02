@@ -20,9 +20,11 @@ def _import():
     return build_artifacts
 
 
-def _trees(tmp_path, ba):
+def _trees(tmp_path, ba, monkeypatch):
     """win tree: 3 content files + data/ + __pycache__/ + .log, and the wsl
-    template dir with fake platform templates."""
+    template dir with fake platform templates. Patches via the monkeypatch
+    fixture so pytest restores the REAL repo globals (WIN/WSL/TEMPLATE_DIR)
+    after each test - the real-tree self-test must run against the repo."""
     win, wsl = tmp_path / "win", tmp_path / "wsl"
     (win / "server").mkdir(parents=True)
     (win / "server" / "kernel.py").write_text("KERNEL")
@@ -38,13 +40,15 @@ def _trees(tmp_path, ba):
     tpl.mkdir()
     (tpl / "mcp.win.json").write_text(WIN_MCP)
     (tpl / "mcp.wsl.json").write_text(WSL_MCP)
-    ba.WIN, ba.WSL, ba.TEMPLATE_DIR = win, wsl, tpl
+    monkeypatch.setattr(ba, "WIN", win, raising=False)
+    monkeypatch.setattr(ba, "WSL", wsl, raising=False)
+    monkeypatch.setattr(ba, "TEMPLATE_DIR", tpl, raising=False)
     return win, wsl
 
 
 def test_generate_mirrors_substitutes_and_excludes(tmp_path, monkeypatch, capsys):
     ba = _import()
-    win, wsl = _trees(tmp_path, ba)
+    win, wsl = _trees(tmp_path, ba, monkeypatch)
     assert ba.main(["generate"]) == 0
     assert (wsl / "server" / "kernel.py").read_text() == "KERNEL"
     assert (wsl / "hooks" / "hooks.json").read_text() == "HOOKS"
@@ -57,7 +61,7 @@ def test_generate_mirrors_substitutes_and_excludes(tmp_path, monkeypatch, capsys
 
 def test_generate_removes_stale_files(tmp_path, monkeypatch):
     ba = _import()
-    win, wsl = _trees(tmp_path, ba)
+    win, wsl = _trees(tmp_path, ba, monkeypatch)
     wsl.mkdir()                                             # target pre-exists
     (wsl / "old.py").write_text("stale")
     (wsl / "data").mkdir()                                  # runtime state stays
@@ -76,7 +80,7 @@ def test_verify_passes_on_the_real_committed_tree(monkeypatch, capsys):
 
 def test_verify_fails_on_mutated_committed_file(tmp_path, monkeypatch, capsys):
     ba = _import()
-    _trees(tmp_path, ba)
+    _trees(tmp_path, ba, monkeypatch)
     ba.main(["generate"])
     (ba.WSL / "server" / "kernel.py").write_text("TAMPERED")
     assert ba.main(["verify"]) == 1
@@ -85,7 +89,7 @@ def test_verify_fails_on_mutated_committed_file(tmp_path, monkeypatch, capsys):
 
 def test_verify_fails_on_stale_committed_file(tmp_path, monkeypatch, capsys):
     ba = _import()
-    _trees(tmp_path, ba)
+    _trees(tmp_path, ba, monkeypatch)
     ba.WSL.mkdir()
     (ba.WSL / "extra.py").write_text("stale")               # generator never makes it
     assert ba.main(["verify"]) == 1
@@ -94,7 +98,7 @@ def test_verify_fails_on_stale_committed_file(tmp_path, monkeypatch, capsys):
 
 def test_verify_fails_on_missing_committed_file(tmp_path, monkeypatch, capsys):
     ba = _import()
-    _trees(tmp_path, ba)
+    _trees(tmp_path, ba, monkeypatch)
     ba.main(["generate"])
     (ba.WSL / "hooks" / "hooks.json").unlink()              # committed tree lost one
     assert ba.main(["verify"]) == 1
@@ -103,7 +107,7 @@ def test_verify_fails_on_missing_committed_file(tmp_path, monkeypatch, capsys):
 
 def test_verify_fails_on_wsl_mcp_deviation(tmp_path, monkeypatch, capsys):
     ba = _import()
-    _trees(tmp_path, ba)
+    _trees(tmp_path, ba, monkeypatch)
     ba.main(["generate"])
     (ba.WSL / ".mcp.json").write_text('{"wsl": "tampered"}\n')
     assert ba.main(["verify"]) == 1
@@ -114,7 +118,7 @@ def test_verify_fails_on_win_mcp_deviation(tmp_path, monkeypatch, capsys):
     """The canonical tree's own .mcp.json must equal the win template - parity
     cannot see it (allowlisted), verify closes that hole."""
     ba = _import()
-    _trees(tmp_path, ba)
+    _trees(tmp_path, ba, monkeypatch)
     (ba.WIN / ".mcp.json").write_text('{"win": "tampered"}\n')
     assert ba.main(["verify"]) == 1
     assert "mcp.win.json" in capsys.readouterr().out
@@ -122,7 +126,7 @@ def test_verify_fails_on_win_mcp_deviation(tmp_path, monkeypatch, capsys):
 
 def test_verify_vacuous_guard(tmp_path, monkeypatch, capsys):
     ba = _import()
-    win, wsl = _trees(tmp_path, ba)
+    win, wsl = _trees(tmp_path, ba, monkeypatch)
     (win / "server" / "kernel.py").unlink()
     (win / "server").rmdir()
     (win / "hooks" / "hooks.json").unlink()
