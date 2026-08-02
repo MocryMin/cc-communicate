@@ -51,7 +51,8 @@ spawn_token). Never parse `message` text.
 "everything up to this sequence FROM THIS STORE is durably received".
 
 - **First listen_v2**: call `query_my_cursors(sid)` (or pass `{}`) to get
-  `{store_id: sequence}`, then `listen_v2(sid, cursors, timeout)`.
+  `data = {cursors: {store_id: sequence}, degraded_stores: [...]}`; pass
+  `data.cursors` to `listen_v2(sid, cursors, timeout)`.
 - It returns the envelope with `data = {messages, next_cursors}`. Each
   message is a record: `{message_id, store_id, sequence, from_session,
   to_session, kind, correlation_id, created_at_ms, payload: {text}}`.
@@ -258,9 +259,10 @@ listener - only use the listen/listen_v2 tool.
   `data.degraded_stores`; if the LOCAL kernel never answered, the call
   returns `err(INTERNAL, retryable=True)` instead of a fake empty success.
 - `query_my_cursors(session_id) -> dict` - Recover `data` =
-  `{store_id: sequence}` after compact / restart. Pass the result as
-  `cursors` on your next `listen_v2`. A store that never answered is listed
-  in `data.degraded_stores`; a local kernel failure returns
+  `{cursors: {store_id: sequence}, degraded_stores: [store_id, ...]}`
+  (`degraded_stores` = [] when every store answered). Pass **`data.cursors`**
+  as `cursors` on your next `listen_v2` - the map itself is always free of
+  metadata (RAR-01). A local kernel failure returns
   `err(INTERNAL, retryable=True)`.
 - `listen(session_id, acked_ts=0, timeout=30) -> dict` - LEGACY timestamp
   ACK. Kept one release to drain pre-upgrade `.md` messages. `data` =

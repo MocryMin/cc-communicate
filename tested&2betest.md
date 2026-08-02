@@ -1185,3 +1185,49 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Confidence**: high — every AR locked by new tests except AR-04/06 (contract corrections; re-verified by
   report/plan text consistency) and AR-05's tag (commit-level identity). T46 re-test remains the standing
   upgrade path.
+
+### T51 — Re-acceptance round 2: RAR-01~04 (customer REVISE_REQUESTED -> final gates ready)
+
+- **Context**: customer's second-round review
+  (`docs/superpowers/reviews/2026-08-03-hardening-reacceptance-review.md`) returned `REVISE_REQUESTED`
+  (narrow scope, no Wave 1-4 reopen). Three real gaps + one docs gap, all confirmed against the code
+  before fixing: (1) RAR-01 - `query_my_cursors` put `degraded_stores` INSIDE the cursor map, which
+  `validate_cursors` (mcp_server listen_v2 entry) rejects as INVALID_ARGUMENT when the result is passed
+  per docs; (2) RAR-02 - re-observing a PID does not refresh dict order, so `1..8 -> 1 -> 9` trims the
+  just-re-observed 1 (false-dead -> needless resume/spawn); (3) RAR-03 - `.claude-plugin/plugin.json` +
+  marketplace.json still `0.3.0`/"16 MCP tools" (actual 20 tools, tag v0.4.0) and `claude plugin list`
+  reported that stale identity; README had no clean-checkout install path; (4) RAR-04 - report header
+  facts stale (febc803/204/integration classification) + premature pass claims.
+- **RAR-01 (P0)**: `query_my_cursors` -> stable wrapper `data = {cursors: {...}, degraded_stores: [...]}`
+  (both paths same shape; `[]` when clean). Cursor map never carries metadata; SKILL + tool docstring say
+  pass `data.cursors`. Rewrote the 2 shape-pinned tests + new entry-level composition test
+  (degraded result -> `validate_cursors` passes -> `listen_v2` ok + degradation observable).
+- **RAR-02 (P1)**: `kernel.py _handle_start` pop-then-reinsert on re-observed PID (recency refresh);
+  start_time still validation-only. 2 tests: `1..8 -> 1(re-observed) -> 9` keeps 1 (order
+  `[3..8,1,9]` pinned), only-1-alive `check_alive == 1`; same sequence through the persisted replay
+  (`process_session_ctrl_event`).
+- **RAR-03 (P1)**: plugin.json + marketplace.json (win AND wsl twins) -> `0.4.0` / "Exposes 20 MCP
+  tools"; README new "Install / load" section (claude plugin marketplace add <v2_win> -> install ->
+  list/details verify); new anti-drift gate `tests/unit/test_plugin_manifest_gate.py` (version == 0.4.0,
+  tool count == real @mcp.tool count == 20, marketplace source -> canonical tree, win/wsl marketplace
+  twin byte-identical - the twin is OUTSIDE build_artifacts' mirror scope). **Smoke**: `claude plugin
+  validate` PASS + `claude plugin details cc-communicate@cc-communicate-local` now reports
+  `cc-communicate 0.4.0 ... Exposes 20 MCP tools` (was 0.3.0/16).
+- **RAR-04 (P2)**: completion report header (终点 a8927a0 + tag v0.4.0, tests 227, classification
+  unit+parity, external review incl. 2 acceptance rounds) + §8 wording (final ACCEPTED pending) + §9.2
+  RAR disposition table; response doc (§4 gate-6 claim corrected - "20 与 .mcp.json 一致" was wrong;
+  .mcp.json doesn't enumerate tools, plugin.json is the manifest) + §8 RAR section; reacceptance review
+  + response enter the delivery commit.
+- **Auto gate (raw)**: `py -3 tools/run_regression.py` ->
+  T0 syntax PASS (44 .py + 2 .js) / T1 pytest PASS (**227 passed** = 220 + 7 new) /
+  T2 parity PASS (32) / T2 artifacts PASS (33, templates pinned) / **GATE: PASS**.
+  Artifacts regenerated (manifests + server + SKILL + README + kernel); 0-diff holds.
+- **Round-3 gates (审核方 §5, 6/6)**: (1) degraded query_my_cursors -> listen_v2 composes (no
+  INVALID_ARGUMENT, degradation observable); (2) `1..8 -> 1 -> 9` order + check_alive + replay; (3)
+  manifest 0.4.0/20 + parity/artifacts green; (4) README install path smoked via `claude plugin
+  details`; (5) report facts + response + review doc in the delivery commit; (6) 220 + 7 new green,
+  T0/T1/T2 all PASS.
+- **Result**: PASS — RAR-01~04 dispositions DONE; tag v0.4.0 moved to the round-3 delivery commit
+  (manifest now matches the tag); ready for final ACCEPTED.
+- **Confidence**: high — every RAR locked by a regression test; the manifest fix verified through the
+  real plugin CLI (not just the test).

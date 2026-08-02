@@ -15,14 +15,14 @@
 | 指标 | 数值 |
 |---|---|
 | 执行周期 | 2026-07-24 ~ 2026-08-03（10 天） |
-| 起点 → 终点 | v0.3.0 (`c114aa1`) → `febc803` (main, pushed to origin) |
-| Commits | 89 |
-| 自动化测试 | 0 → **204**（从零建立） |
+| 起点 → 终点 | v0.3.0 (`c114aa1`) → `a8927a0`（tag `v0.4.0`）+ 修订 commit（`8be326f` 说明、二轮 RAR 修订） |
+| Commits | 92（至二轮修订交付 commit） |
+| 自动化测试 | 0 → **227**（从零建立） |
 | Server 模块 | 22 个 `.py` + 2 个 `.js` |
 | MCP 工具 | 16 → **20**（新增 `listen_v2`、`query_my_cursors`、`spawn_collaborator`、`claim_pending_spawn`） |
 | 回归 gate | T0 语法 / T1 pytest / T2 parity + artifacts → **GATE PASS** |
 | Live gates | L1-L7 全部完成（L2 DEGRADED (T46)，其余 PASS） |
-| 外部审核 | Wave 1-4 逐波审核，全部 PASS，无 fix-before-merge 项 |
+| 外部审核 | Wave 1-4 逐波审核，全部 PASS，无 fix-before-merge 项；验收审核两轮：`REVISE_REQUESTED`（AR-01~06）→ 二轮 `REVISE_REQUESTED`（RAR-01~04，处置完成，待最终 `ACCEPTED`） |
 
 ### 1.2 波次路线图与完成状态
 
@@ -41,7 +41,7 @@
 ### 已实现（13/14）
 
 #### HP-00 — 自动化测试基线与数据隔离（Gate 0）✅
-- `tests/` 目录从零建立，220 个测试覆盖 unit + integration + parity（204 基线 + AR-01~03/N-01~03 新增 16，见 §9）。
+- `tests/` 目录从零建立，227 个测试覆盖 **unit + parity**（自动测试目录分类为 unit/parity；live gates 为手工证据，记录于 `tested&2betest.md`；220 基线 + RAR 修订新增 7，见 §9）。
 - `CC_COMMUNICATE_DATA_DIR` 环境变量 override（`paths.py` + `paths.js` 双边同步），测试使用独立临时 data root，不触碰已装插件。
 - conftest 依赖序 reload 机制确保模块路径常量正确绑定。
 - **验收**：`pytest` 单命令可跑；可重复证明"取消不丢消息"和"kernel restart 后可恢复"。
@@ -236,14 +236,14 @@ disconnected 状态出现（T46，2/2 失败，CC 侧 quirk，无 cc-communicate
 ```
 $ py -3 tools/run_regression.py
 T0 syntax  PASS (44 .py + 2 .js parsed clean)
-T1 pytest  PASS (220 passed in 16.92s)
+T1 pytest  PASS (227 passed in 18.82s)
 T2 parity  PASS (PARITY OK (32 files compared, allowlist=['.mcp.json']))
 T2 artifacts PASS (ARTIFACTS OK (33 files compared, templates pinned))
 GATE: PASS
 ```
 
 - **T0 语法**：两棵树的 44 个 `.py`（ast.parse）+ 2 个 `.js`（node --check）全部通过。
-- **T1 pytest**：220 个测试全部通过（204 基线 + AR-01~03/N-01~03 新增 16 个：MCP 依赖门 3、传输故障注入 7、known_pids 4、close_connection degraded 1、gate stderr 1；unit + integration + parity + tooling）。
+- **T1 pytest**：227 个测试全部通过（204 基线 + AR-01~03/N-01~03 新增 16 + RAR 新增 7：MCP 依赖门 3、传输故障注入 7、known_pids 4、close_connection degraded 1、gate stderr 1、cursor 组合 1、recency 2、manifest gate 4、marketplace twin 1；unit + parity + tooling）。
 - **T2 parity**：v2_win ↔ v2_wsl 在 allowlist 之外字节一致（32 文件）。
 - **T2 artifacts**：committed v2_wsl == generator 输出（33 文件，含 `.mcp.json` 模板 pin）。
 
@@ -346,7 +346,7 @@ canonical 树上的 generate 操作是 0-diff——committed artifact 已与 gen
 
 ## 8. 结论
 
-cc-communicate 加固程序已完成并通过验收修订（AR-01~06 + N-01~03）。14 条提案中 13 条已实现并通过自动化 gate（220 测试 + parity 32 + artifacts 33）、7 个 live gate（L2 以 `DEGRADED (T46)` 交付，见 §3.7）和 4 轮外部审核。1 条（HP-12 可观测性）为 `DEFERRED（分阶段接受，AR-06）`，H1 期间有明确替代观测面，重启条件已定义（见 §2）。
+cc-communicate 加固程序完成；两轮验收修订（AR-01~06 + N-01~03，及二轮 RAR-01~04）处置完成。14 条提案中 13 条已实现并通过自动化 gate（227 测试 + parity 32 + artifacts 33）、7 个 live gate（L2 以 `DEGRADED (T46)` 交付，见 §3.7）和 4 轮外部审核 + 2 轮验收审核。1 条（HP-12 可观测性）为 `DEFERRED（分阶段接受，AR-06）`，H1 期间有明确替代观测面，重启条件已定义（见 §2）。按审核方流程，**最终 `ACCEPTED` 判定待第三轮重验收**（§9.2 的 6 条门）。
 
 **交付语义**：`at-least-once delivery + per-store ordering + detectable duplicates + idempotent mutation`——已兑现并验证。
 
@@ -382,6 +382,21 @@ cc-communicate 加固程序已完成并通过验收修订（AR-01~06 + N-01~03�
 **重验收门对照**（审核方 §5，全部满足）：①全新环境按声明安装可导入 MCP server（AR-01 门）；②220 测试 + T0/T2 全绿（本报告 §4.1 原始输出）；③`listen_v2`/`query_my_cursors` 区分"成功无数据"与"扫描失败"（AR-02 注入测试）；④9+ 含缺失/混合 start_time 的 SessionStart replay 不崩溃（AR-03 测试）；⑤L2 = DEGRADED + spawn-fresh fallback，不再标 PASS（AR-04）；⑥win/wsl parity 32 + artifacts 33 继续通过，权威安装入口唯一，工具数 20 与报告一致，版本 build identity = tag v0.4.0（AR-05）；⑦本报告（含 AR 处置）进入最终 commit，原始输出摘要见 §4.1（AR-06）。
 
 **测试数说明**：220 = 204（Wave 1-4 基线）+ 16（AR 修订新增：test_mcp_dependency_gate 3 + test_cursor_ack AR-02 7 + test_cursor_ack N-01 1 + test_check_alive_fallback 4 + test_run_regression 1）。
+
+### 9.2 二轮修订处置（RAR-01~04）
+
+审核方第二轮重验收（`docs/superpowers/reviews/2026-08-03-hardening-reacceptance-review.md`）返回 `REVISE_REQUESTED`（窄范围），逐条处置如下（全部 DONE）：
+
+| # | 修订内容 | 处置 | 证据 |
+|---|---|---|---|
+| RAR-01 (P0) | 降级 cursor 结果不可组合（`degraded_stores` 污染 cursor map，按文档传给 `listen_v2` 被 `validate_cursors` 拒为 INVALID_ARGUMENT） | `query_my_cursors` 返回**稳定 wrapper** `data = {cursors, degraded_stores}`（两种路径同形，`degraded_stores` 恒为列表、干净时为 `[]`）；cursor map 本身永不含元数据。SKILL.md + 工具 docstring 同步（传 `data.cursors`）。重写 2 个 shape 测试 + 新增**入口级组合测试**（降级结果 → `validate_cursors` 通过 → `listen_v2` 正常且降级仍可观察） | `user_functions.py` query_my_cursors；`mcp_server.py` docstring；`SKILL.md`；`tests/unit/test_cursor_ack.py`（test_query_my_cursors_degraded_composes_into_listen_v2） |
+| RAR-02 (P1) | 重复 PID 再次写入不刷新 dict 位置 → 刚重观察的 PID 仍可能被当最旧项裁掉（false-dead → 多余 resume/spawn） | `kernel.py _handle_start`：重观察 PID **pop-then-reinsert** 刷新 recency（更新前先移除旧 key 再按当前事件重新插入）。start_time 继续仅用于 PID 复用验证；无 schema 变更。新增 2 测试：`1..8 → 1(重观察) → 9` 断言 1 在最近集合且仅 1 存活时 `check_alive == 1`；同序列走持久化 replay 路径 | `kernel.py`；`tests/unit/test_check_alive_fallback.py`（test_known_pids_reobserved_pid_refreshes_recency / test_known_pids_reobserved_replay） |
+| RAR-03 (P1) | 权威 manifest 与交付声明不一致（`plugin.json`/`marketplace.json` 仍 0.3.0/"16 MCP tools"，实际 20 工具 + tag v0.4.0）；README 无 clean-checkout 安装路径 | 两份 manifest → `version 0.4.0` + "Exposes 20 MCP tools"；`build_artifacts.py generate` 同步双树；README 新增唯一安装/加载路径（`claude plugin marketplace add <v2_win> → install → list/details 验证`）；新增**防漂移 gate**（3 测试：版本 == 0.4.0、工具数 == mcp_server.py 实计 20、marketplace source 指向 canonical 树）；**smoke 通过**：`claude plugin validate` ✔ + `claude plugin details` 上报 `0.4.0 / Exposes 20 MCP tools` | `v2_win/cc-communicate/.claude-plugin/plugin.json`；`v2_win/.claude-plugin/marketplace.json`；`README.md`；`tests/unit/test_plugin_manifest_gate.py`；`claude plugin details` 输出 |
+| RAR-04 (P2) | 报告顶部事实过期（终点 febc803/204/含 integration 分类）+ 提前声称通过 | 本报告顶部规模表（终点 `a8927a0` + tag、测试 227、分类 unit+parity、外部审核含两轮验收）与 §8 结论措辞（待最终 ACCEPTED）更正；§9.2 即本表；重验收审核原文 + 本 response 随交付 commit 入库 | 本报告各节；`2026-08-03-hardening-reacceptance-review.md`；`2026-08-03-reacceptance-response.md` |
+
+**第三轮最小重验收门对照**（审核方 §5，全部满足）：①`query_my_cursors → listen_v2` 降级时按文档直接组合且降级不丢（RAR-01 组合测试）；②`1..8 → 1(重观察) → 9` 顺序与 `check_alive` 回归测试含 replay（RAR-02）；③canonical manifest `0.4.0 / 20 tools`，win/wsl regenerate 后 parity/artifact gate 通过（RAR-03）；④README 给出并 smoke 验证唯一安装/加载路径（`claude plugin details` 0.4.0/20，RAR-03）；⑤报告 commit/测试数/分类/状态与仓库事实一致，response 与重验收审核进入交付 commit（RAR-04）；⑥原 220 项 + 新增 6 项全绿，T0/T1/T2 全 PASS。
+
+**测试数说明（二轮）**：227 = 220（一轮修订后）+ 7（RAR 新增：组合 1 + recency 2 + manifest gate 4 + marketplace twin 1）。
 
 ---
 

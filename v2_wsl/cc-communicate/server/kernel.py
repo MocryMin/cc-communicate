@@ -302,7 +302,14 @@ def _handle_start(ev: dict, sid: str):
         "machine": _local_machine_type,
         "known_pids": known,
     }
-    known[ev.get("pid")] = parse_start_time(ev.get("start_time"))
+    pid = ev.get("pid")
+    # RAR-02: a re-observed PID must refresh its recency. A dict update keeps
+    # the OLD position, so pop-then-reinsert - otherwise a just-observed pid
+    # can still be the oldest entry and get trimmed at the next bound,
+    # producing false-dead (needless resume/spawn, duplicate worker risk).
+    if pid in known:
+        known.pop(pid)
+    known[pid] = parse_start_time(ev.get("start_time"))
     if len(known) > 8:
         # AR-03: bound-trim by INSERTION ORDER, never by start_time value.
         # parse_start_time returns None for missing/malformed values, and

@@ -753,10 +753,14 @@ def listen_v2(session_id: str, cursors: dict = None, timeout: int = 30) -> dict:
 
 def query_my_cursors(session_id: str) -> dict:
     """Recover your per-store cursors, merged across this machine + the host
-    (each kernel persists only its own store's cursors). AR-02: a local
-    kernel failure is NOT returned as an empty success - it fails
-    INTERNAL/retryable; a failed host query degrades to the local result with
-    a `degraded_stores` marker in data."""
+    (each kernel persists only its own store's cursors). Returns
+    data = {cursors: {store_id: sequence}, degraded_stores: [store_id, ...]}
+    (degraded_stores = [] when every store answered). RAR-01: degraded
+    metadata lives OUTSIDE the cursor map, so `data.cursors` passes
+    validate_cursors and composes directly into the next listen_v2 - the map
+    itself is never polluted with non-cursor keys. AR-02: a local kernel
+    failure is NOT returned as an empty success - it fails
+    INTERNAL/retryable; a failed host query degrades to the local result."""
     local_id, host = _store_ids()
     out = {}
     local_ok = False
@@ -777,11 +781,9 @@ def query_my_cursors(session_id: str) -> dict:
         return _err(Code.INTERNAL,
                     "local kernel unreachable (query_cursors failed)",
                     retryable=True)
-    degraded = _degraded_stores(local_id, host, local_ok, remote_ok)
-    if degraded:
-        out = dict(out)
-        out["degraded_stores"] = degraded
-    return _ok(out)
+    return _ok({"cursors": out,
+                "degraded_stores": _degraded_stores(local_id, host,
+                                                    local_ok, remote_ok)})
 
 
 def query_my_ACK_timestamp(session_id: str) -> dict:

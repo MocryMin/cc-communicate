@@ -166,6 +166,57 @@ def test_known_pids_old_log_replay_no_crash(server):
     assert k.sessions["sess-ar03"]["pid"] == 409  # last event processed
 
 
+# ---------- RAR-02: re-observed PIDs must refresh recency ----------
+# 1..8 -> re-observe 1 -> observe 9: a dict update keeps the OLD position, so
+# without pop-then-reinsert the just-re-observed 1 becomes the trim victim
+# and check_alive misses the only live fallback PID (false-dead).
+
+
+def test_known_pids_reobserved_pid_refreshes_recency(server, monkeypatch):
+    """The RAR-02 repro sequence, direct: 1..8 -> 1 (re-observed) -> 9 must
+    keep 1 in the recent set; with only PID 1 alive, check_alive == 1."""
+    ka = server.kernel_api
+    k = server.kernel
+    monkeypatch.setattr(k, "parse_start_time", lambda _s: 1000.0)
+    fake = {1: 1000.0}  # only PID 1 is alive
+    monkeypatch.setattr(server.proc, "proc_start_time", lambda pid: fake.get(pid))
+    seq = [1, 2, 3, 4, 5, 6, 7, 8, 1, 9]
+    for i, pid in enumerate(seq):
+        ev = {"event": "start", "event_ts": i, "session_id": "sess-rar02",
+              "pid": pid, "cwd": "/tmp/x", "start_time": "unused",
+              "source": "startup"}
+        k._handle_start(ev, "sess-rar02")
+    alive = server.kernel.alive_sessions
+    known = alive["sess-rar02"]["known_pids"]
+    # re-observation moved 1 to the back; the trim took the oldest (2)
+    assert list(known) == [3, 4, 5, 6, 7, 8, 1, 9]
+    assert len(known) <= 8
+    assert alive["sess-rar02"]["pid"] == 9  # primary = last event
+    assert ka.check_alive(alive, "sess-rar02") == 1  # fallback finds the live 1
+
+
+def test_known_pids_reobserved_replay(server):
+    """The same sequence through the persisted-replay path
+    (process_session_ctrl_event): re-observed PID survives, bounded."""
+    import json
+    k = server.kernel
+    server.paths.ensure_runtime_dirs()
+    sdir = server.paths.SESSION_CTRL_DIR
+    seq = [400, 401, 402, 403, 404, 405, 406, 407, 400, 408]
+    for i, pid in enumerate(seq):
+        ev = {"event": "start", "event_ts": 2000 + i,
+              "session_id": "sess-rar02", "pid": pid, "cwd": "/tmp/x",
+              "start_time": "2026-08-03T02:00:00Z", "source": "startup"}
+        with open(os.path.join(sdir, "start_%d_%d.json" % (2000 + i, i)),
+                  "w", encoding="utf-8") as f:
+            json.dump(ev, f)
+    assert k.process_session_ctrl_event() is True
+    known = k.alive_sessions["sess-rar02"]["known_pids"]
+    assert 400 in known  # re-observed PID survives the trim
+    assert list(known) == [402, 403, 404, 405, 406, 407, 400, 408]
+    assert len(known) <= 8
+
+
 # ---------- T35: session_by_pid known_pids fallback (the my_session_id hole) ----------
 
 

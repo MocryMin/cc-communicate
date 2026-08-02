@@ -168,7 +168,9 @@ def test_query_my_cursors_merges(server, monkeypatch):
     monkeypatch.setattr(uf.machine_identity, "load_or_create",
                         lambda: {"id": LOCAL, "type": "wsl-test"})
     r = uf.query_my_cursors("bob")
-    assert r["ok"] is True and r["data"] == {LOCAL: 6, HOST: 3}
+    # RAR-01: stable wrapper - cursors map is NEVER polluted with metadata
+    assert r["ok"] is True
+    assert r["data"] == {"cursors": {LOCAL: 6, HOST: 3}, "degraded_stores": []}
 
 
 def test_close_connection_uploads_cursors_per_store(server, monkeypatch):
@@ -304,8 +306,40 @@ def test_query_my_cursors_remote_unreachable_degraded(server, monkeypatch):
              lambda m, f, a, **kw: None)
     r = uf.query_my_cursors("bob")
     assert r["ok"] is True
-    assert r["data"][LOCAL] == 6
+    assert r["data"]["cursors"] == {LOCAL: 6}  # RAR-01: map stays metadata-free
     assert r["data"]["degraded_stores"] == [HOST]
+
+
+def test_query_my_cursors_degraded_composes_into_listen_v2(server, monkeypatch):
+    """RAR-01 acceptance: the degraded query_my_cursors result, passed per
+    the docs (`data.cursors`) into the next listen_v2, must pass the public
+    entry's validate_cursors (never INVALID_ARGUMENT) and the degraded store
+    stays observable - the system's most-needed path, exactly when recovery
+    info matters."""
+    import importlib
+    uf = importlib.import_module("user_functions")
+
+    def fake_call(fn, args, **kw):
+        if fn == "query_cursors":
+            return {LOCAL: 6}
+        return {"store_id": LOCAL, "next_cursor": 6, "messages": []}
+
+    monkeypatch.setattr(uf.rpc_client, "call", fake_call)
+    monkeypatch.setattr(uf.rpc_client, "call_remote", lambda m, f, a, **kw: None)
+    monkeypatch.setattr(uf, "_host_entry", lambda: {"id": HOST, "type": "win-host"})
+    monkeypatch.setattr(uf.machine_identity, "load_or_create",
+                        lambda: {"id": LOCAL, "type": "wsl-test"})
+    monkeypatch.setattr(uf, "_LISTEN_POLL", 0.05)
+    r = uf.query_my_cursors("bob")
+    assert r["ok"] is True
+    cursors = r["data"]["cursors"]  # what the docs tell the caller to pass
+    assert r["data"]["degraded_stores"] == [HOST]
+    # public entry validation (mcp_server runs this on listen_v2's cursors)
+    assert server.validation.validate_cursors(cursors) == {LOCAL: 6}  # no raise
+    r2 = uf.listen_v2("bob", cursors, timeout=1)
+    assert r2["ok"] is True  # no INVALID_ARGUMENT; composition works
+    assert r2["data"]["next_cursors"] == {LOCAL: 6}
+    assert r2["data"]["degraded_stores"] == [HOST]  # degradation still observable
 
 
 # ---------- N-01: close_connection reports degraded best-effort steps ----------

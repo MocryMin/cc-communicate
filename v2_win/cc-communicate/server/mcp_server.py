@@ -256,10 +256,13 @@ def query_my_ACK_timestamp(session_id: str) -> dict:
 
 @mcp.tool()
 def query_my_cursors(session_id: str) -> dict:
-    """Recover your per-store cursors ({store_id: sequence}) from the kernels
-    (local + host merged). Call after a compact / long gap / kernel restart,
-    then pass the result as `cursors` on your next listen_v2. Returns the
-    envelope: ok(cursors)."""
+    """Recover your per-store cursors from the kernels (local + host merged).
+    Call after a compact / long gap / kernel restart, then pass
+    `data.cursors` as `cursors` on your next listen_v2 (the map itself stays
+    free of metadata; stores that never answered are listed in
+    `data.degraded_stores`, [] when every store did). Returns the envelope:
+    ok({cursors, degraded_stores}); err(INTERNAL, retryable) when the local
+    kernel is unreachable."""
     err = _entry_error((validation.validate_session_id, session_id))
     if err:
         return err
