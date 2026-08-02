@@ -132,3 +132,40 @@ def test_mcp_evoke_override_param(server, monkeypatch):
     assert captured["kwargs"]["permission_mode"] == "standard"
     r = mcp_server.evoke("s1", permission_mode="root")
     assert r["ok"] is False and r["code"] == Code.INVALID_ARGUMENT
+
+
+def test_create_collaborator_legacy_bypass_marked(server, monkeypatch):
+    monkeypatch.setattr(user_functions, "spawn_collaborator",
+                        lambda *a, **k: {
+                            "ok": True, "code": None, "message": None,
+                            "data": {"session_id": "s9", "machine_id": "m1",
+                                     "cwd": "/tmp", "spawn_token": "t1",
+                                     "connection_status": "registered",
+                                     "permission_mode": "bypass"},
+                            "retryable": False})
+    monkeypatch.setattr(user_functions, "connect",
+                        lambda *a, **k: {
+                            "ok": True, "code": None, "message": None,
+                            "data": {"connection_id": "c1", "reply": "hello bob",
+                                     "established_at_ms": 1, "reused": False},
+                            "retryable": False})
+    s = user_functions.create_collaborator("caller", "/tmp", hold_time=300)
+    assert s.endswith(" ; permission_mode=bypass (legacy)")
+    assert s.startswith("connect succeed; reply: hello bob")   # prefix intact
+
+
+def test_bypass_spawn_logged(server, caplog, monkeypatch):
+    """D4 '日志标记': bypass spawns leave a durable kernel-log line."""
+    import logging
+    ka = server.kernel_api
+    monkeypatch.setattr(server.spawn, "spawn_cc_new",
+                        lambda *a, **kw: None)
+    with caplog.at_level(logging.INFO, logger="cc-communicate.kernel"):
+        ka.spawn_cc_new("/tmp", "p", spawn_token="t1",
+                        permission_mode="bypass")
+    assert any("permission_mode=bypass" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="cc-communicate.kernel"):
+        ka.spawn_cc_new("/tmp", "p", spawn_token="t2",
+                        permission_mode="standard")
+    assert not any("permission_mode=bypass" in r.message for r in caplog.records)

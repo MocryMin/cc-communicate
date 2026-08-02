@@ -53,6 +53,9 @@ def _kernel_err(e: KernelError):
 def _remote_err():
     return _err(Code.PEER_UNREACHABLE, "peer machine unreachable")
 
+# D4: the legacy create_collaborator predates the standard default - mark
+# its bypass mode in the returned string (suffix; prefixes stay byte-exact).
+_LEGACY_BYPASS_SUFFIX = " ; permission_mode=bypass (legacy)"
 _REVIVE_WAIT = 30.0
 # Floor for create_collaborator hold_time. A freshly-spawned CC can take
 # >120s to boot + start its listener + reply on Windows (observed ~121s,
@@ -885,18 +888,22 @@ def create_collaborator(caller_sid: str, cwd: str, hold_time: int = 300,
     """LEGACY wrapper (one release, HP-07): spawn + connect, returns the
     legacy string shape. New code should use spawn_collaborator (structured
     WorkerHandle) + connect. The spawn prompt stays the OLD text so its
-    correlation_id-less replies exercise connect's legacy fallback (D9)."""
+    correlation_id-less replies exercise connect's legacy fallback (D9).
+    HP-10 (D4): keeps permission_mode="bypass" EXPLICITLY (pre-dates the
+    standard default) and marks it in the returned string + kernel log."""
     hold_time = max(hold_time, _MIN_HOLD_TIME)
     res = spawn_collaborator(caller_sid, cwd, spawn_token=None,
-                             machine=machine, hold_time=hold_time)
+                             machine=machine, hold_time=hold_time,
+                             permission_mode="bypass")
     if not res["ok"]:
-        return "failed, " + str(res.get("message"))
+        return "failed, " + str(res.get("message")) + _LEGACY_BYPASS_SUFFIX
     handle = res["data"]
     cr = connect(caller_sid, handle["session_id"], hold_time=hold_time)
     if cr["ok"]:
         reply = (cr["data"] or {}).get("reply")
-        return ("connect succeed; reply: " + reply) if reply else "connect succeed"
-    return "connect failed, " + str(cr.get("message"))
+        base = ("connect succeed; reply: " + reply) if reply else "connect succeed"
+        return base + _LEGACY_BYPASS_SUFFIX
+    return "connect failed, " + str(cr.get("message")) + _LEGACY_BYPASS_SUFFIX
 
 
 def query_machines() -> dict:

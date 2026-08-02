@@ -118,4 +118,4 @@ def test_create_collaborator_legacy_strings(server, monkeypatch):
                                      "established_at_ms": 1, "reused": False},
                             "retryable": False})
     s = user_functions.create_collaborator("caller", "/tmp", hold_time=300)
-    assert s == "connect succeed; reply: hello bob"
+    assert s == "connect succeed; reply: hello bob ; permission_mode=bypass (legacy)"
