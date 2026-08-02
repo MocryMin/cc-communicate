@@ -326,13 +326,17 @@ def _read_pipe_message(src: str, info: dict):
         rec = message_record.read_record(src)
         if not rec:
             return None
-        return {"time": rec.get("created_at_ms", 0),
-                "from_id": rec.get("from_session"),
-                "message": (rec.get("payload") or {}).get("text"),
-                "message_id": rec.get("message_id"),
-                "sequence": rec.get("sequence"),
-                "store_id": rec.get("store_id"),
-                "_sort": (1, 0, rec.get("sequence") or 0)}
+        payload = rec.get("payload") or {}
+        out = {"time": rec.get("created_at_ms", 0),
+               "from_id": rec.get("from_session"),
+               "message": payload.get("text"),
+               "message_id": rec.get("message_id"),
+               "sequence": rec.get("sequence"),
+               "store_id": rec.get("store_id"),
+               "_sort": (1, 0, rec.get("sequence") or 0)}
+        if payload.get("artifact_refs"):
+            out["artifact_refs"] = payload["artifact_refs"]  # HP-09 (D5)
+        return out
     try:
         with open(src, encoding="utf-8") as f:
             content = f.read()

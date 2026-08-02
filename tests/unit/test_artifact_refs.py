@@ -98,3 +98,42 @@ def test_bad_refs_at_entry_rejected(server):
     r = mcp_server.send_message("a", "b", "hi", artifact_refs=[
         {"path": "/x", "size": -1, "sha256": "a" * 64, "media_type": "t"}])
     assert r["ok"] is False and r["code"] == Code.INVALID_ARGUMENT
+
+
+def test_listen_v2_delivers_refs(server):
+    ka = server.kernel_api
+    _conv_pair(server)
+    refs = [{"uri": "file:///x", "size": 5, "sha256": "d" * 64,
+             "media_type": "text/plain"}]
+    ka.send_message(server.kernel.alive_conversations, {}, "store",
+                    "a", "b", "hi", artifact_refs=refs)
+    res = ka.listen_scan_v2({}, "store", "b", 0)
+    assert len(res["messages"]) == 1
+    assert res["messages"][0]["payload"]["artifact_refs"] == refs
+
+
+def test_legacy_listen_delivers_refs(server):
+    ka = server.kernel_api
+    _conv_pair(server)
+    refs = [{"path": "/tmp/x", "size": 1, "sha256": "e" * 64,
+             "media_type": "t"}]
+    ka.send_message(server.kernel.alive_conversations, {}, "store",
+                    "a", "b", "hi", artifact_refs=refs)
+    res = ka.listen_scan({}, "b", 0)
+    assert res["messages"][0]["artifact_refs"] == refs
+    # ref-less records carry NO artifact_refs key (zero-change for old readers)
+    ka.send_message(server.kernel.alive_conversations, {}, "store",
+                    "a", "b", "plain")
+    res2 = ka.listen_scan({}, "b", 0)
+    assert "artifact_refs" not in res2["messages"][0]
+
+
+def test_collect_messages_delivers_refs(server):
+    ka = server.kernel_api
+    _conv_pair(server)
+    refs = [{"path": "/tmp/x", "size": 1, "sha256": "f" * 64,
+             "media_type": "t"}]
+    ka.send_message(server.kernel.alive_conversations, {}, "store",
+                    "a", "b", "hi", artifact_refs=refs)
+    msgs = ka.collect_messages("b")
+    assert msgs[0]["artifact_refs"] == refs
