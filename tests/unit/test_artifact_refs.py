@@ -115,16 +115,21 @@ def test_listen_v2_delivers_refs(server):
 def test_legacy_listen_delivers_refs(server):
     ka = server.kernel_api
     _conv_pair(server)
+    seq = {}
     refs = [{"path": "/tmp/x", "size": 1, "sha256": "e" * 64,
              "media_type": "t"}]
-    ka.send_message(server.kernel.alive_conversations, {}, "store",
-                    "a", "b", "hi", artifact_refs=refs)
+    r1 = ka.send_message(server.kernel.alive_conversations, seq, "store",
+                         "a", "b", "hi", artifact_refs=refs)
     res = ka.listen_scan({}, "b", 0)
     assert res["messages"][0]["artifact_refs"] == refs
+    # ack the first message (archive) so the next listen returns only the
+    # new one - otherwise both sit in the pipe and listdir order decides
+    ka.listen_scan({}, "b", r1["ts"])
     # ref-less records carry NO artifact_refs key (zero-change for old readers)
-    ka.send_message(server.kernel.alive_conversations, {}, "store",
+    ka.send_message(server.kernel.alive_conversations, seq, "store",
                     "a", "b", "plain")
     res2 = ka.listen_scan({}, "b", 0)
+    assert len(res2["messages"]) == 1
     assert "artifact_refs" not in res2["messages"][0]
 
 
