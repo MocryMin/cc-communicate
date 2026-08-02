@@ -23,13 +23,15 @@ Every tool returns the SAME 5-field envelope:
 
 - `ok` - True on success. When ok, `code` and `message` are None.
 - `code` - one of:
-  `INVALID_ARGUMENT` (bad session/message/connection/spawn-token id, or a
-  message over the inline cap), `NOT_FOUND` (session / conversation /
-  message / pending-spawn token unknown), `PEER_UNREACHABLE` (a peer
-  machine is down), `TIMEOUT` (a wait expired), `CONFLICT` (the pair's
-  connection is already active under a DIFFERENT connection_id),
+  `INVALID_ARGUMENT` (bad session/message/connection/spawn-token id, a
+  malformed artifact_ref, or a non-str message), `NOT_FOUND` (session /
+  conversation / message / pending-spawn token unknown),
+  `PEER_UNREACHABLE` (a peer machine is down), `TIMEOUT` (a wait expired),
+  `CONFLICT` (the pair's connection is already active under a DIFFERENT
+  connection_id),
   `NOT_ALIVE` (the target could not be revived), `RESOURCE_EXHAUSTED`
-  (reserved for the Wave 3 resource policy; no tool returns it yet),
+  (inline cap exceeded - retryable False, switch to artifact_refs; or the
+  peer's unacked backlog is full - retryable True, retry after it drains),
   `INTERNAL` (kernel / transport failure).
 - `message` - human-readable detail only. It is NOT part of the contract:
   NEVER branch on it, NEVER log it as the outcome.
@@ -195,7 +197,14 @@ listener - only use the listen/listen_v2 tool.
   `kind`: free-form tag, defaults to `"text"` (`"hello"` for connect's
   handshake). Messages are capped at 1 MiB inline
   (`CC_COMMUNICATE_MAX_INLINE_BYTES`); over the cap ->
-  `err(INVALID_ARGUMENT)`.
+  `err(RESOURCE_EXHAUSTED)` with `data = {limit_bytes, actual_bytes}` -
+  attach the content out-of-band instead: `artifact_refs=[{path|uri, size,
+  sha256, media_type}]` (max 16, exactly one of path/uri, sha256 = 64
+  lowercase hex); refs ride in the record payload and are delivered to
+  listeners. When the peer's unacked backlog is full
+  (`CC_COMMUNICATE_MAX_BACKLOG`, default 1000) the send fails with
+  `err(RESOURCE_EXHAUSTED, retryable=True)` and
+  `data = {unacked, cap}` - the peer acks and you retry.
 - `register_conversation(sid_a, sid_b) -> dict` - Mark a LOCAL conversation
   active (low-level; connect handles routing). For bootstrapping/testing.
 - `unregister_conversation(sid_a, sid_b) -> dict` - Mark a LOCAL

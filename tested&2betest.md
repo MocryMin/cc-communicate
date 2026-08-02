@@ -972,3 +972,23 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Method**: unit (test_kernel_exit.py / test_gc.py / test_spawn_token.py / test_spawn_env.py / test_proc_pid_matches.py): exit predicate decoupled from registration (D10); R4 second queue scan (`_exit_decision`); GC whitelist (session_ctrl ≥7d, pending_spawn >TTL, responses ≥7d) never touches pipe/log (structural guardrail test); pending_spawn TTL un-poisons same-token retries; spawn env sanitization (T38 code-level fix); `proc.pid_matches` dedup; `run_gc` kernel-function dispatch. Full auto gate `py -3 tools/run_regression.py --tier auto` → GATE PASS.
 - **Result**: PASS (144 unit tests; parity OK 30 files; auto gate GATE PASS). Live gates (full L1-L6, incl. the mandated L3/L4) deferred to the Wave 3 exit gate per the user's locked decision (run_regression.py now prints L5/L6 checklists too).
 - **Confidence**: high for unit semantics; live verification at Wave 3 exit.
+
+### T42 — HP-09 unit acceptance: RESOURCE_EXHAUSTED activated + artifact_refs + backpressure
+
+- **Method**: unit (test_resource_limits.py / test_artifact_refs.py):
+  over-limit inline text -> RESOURCE_EXHAUSTED envelope with
+  {limit_bytes, actual_bytes} (dormant code activated); artifact_refs schema
+  validation matrix (both trust boundaries), record payload carries refs,
+  delivered via listen_v2 (raw record) + legacy listen/collect_messages;
+  over-limit text WITH refs still rejected; per-pair unacked cap
+  (CC_COMMUNICATE_MAX_BACKLOG) -> RESOURCE_EXHAUSTED retryable, releases
+  after drain; backlog_stats kernel function per-partner counts+bytes.
+  Also fixed a flaky test found by repeated suite runs (legacy-refs test:
+  both messages shared sequence 1, so listdir order decided which message
+  the second listen returned - test now acks the first message + shares one
+  seq state). Full auto gate `py -3 tools/run_regression.py --tier auto`
+  -> GATE PASS.
+- **Result**: PASS (164 unit tests; parity OK; auto gate GATE PASS). Live
+  gates (full L1-L6, incl. the mandated L3/L4) deferred to the Wave 3 exit
+  gate per the user's locked decision.
+- **Confidence**: high for unit semantics; live verification at Wave 3 exit.
