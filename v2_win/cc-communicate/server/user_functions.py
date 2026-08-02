@@ -130,7 +130,8 @@ def _register(caller, target, conv_remote):
         rpc_client.call_remote(conv_remote, "register_conversation", {"sid_a": caller, "sid_b": target})
 
 
-def _send(fromid, toid, message, conv_remote, correlation_id=None, kind=None):
+def _send(fromid, toid, message, conv_remote, correlation_id=None, kind=None,
+          artifact_refs=None):
     # HP-01/HP-03: one message_id per LOGICAL send, generated here so every
     # funnel (send_message / connect hello / close notice) gets dedup for
     # free. The rpc layer reuses it as the operation_id, so a transport retry
@@ -141,6 +142,8 @@ def _send(fromid, toid, message, conv_remote, correlation_id=None, kind=None):
         args["correlation_id"] = correlation_id
     if kind is not None:
         args["kind"] = kind
+    if artifact_refs is not None:
+        args["artifact_refs"] = artifact_refs
     if conv_remote is None:
         return rpc_client.call("send_message", args, operation_id=mid)
     return rpc_client.call_remote(conv_remote, "send_message", args, operation_id=mid)
@@ -364,14 +367,16 @@ def query_conversations(session_id: str) -> dict:
 
 
 def send_message(fromid: str, toid: str, message: str,
-                 correlation_id: str = None, kind: str = None) -> dict:
+                 correlation_id: str = None, kind: str = None,
+                 artifact_refs: list = None) -> dict:
     """Route by the conversation store (host for cross-machine, else local).
     ok({message_id, ts}) on success; err(NOT_FOUND) when the conversation is
     not registered; err(INTERNAL/PEER_UNREACHABLE) on transport failure."""
     conv_remote = _conv_store(toid)
     try:
         r = _send(fromid, toid, message, conv_remote,
-                  correlation_id=correlation_id, kind=kind)
+                  correlation_id=correlation_id, kind=kind,
+                  artifact_refs=artifact_refs)
     except KernelError as e:
         return _kernel_err(e)
     if r is None:

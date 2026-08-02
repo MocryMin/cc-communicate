@@ -31,6 +31,8 @@ _ID_RE = re.compile(r"^(?=.*[A-Za-z0-9])[A-Za-z0-9-]{1,128}$")
 # the resource policy in Wave 3).
 MAX_INLINE_BYTES = int(os.environ.get("CC_COMMUNICATE_MAX_INLINE_BYTES",
                                       str(1024 * 1024)))
+# Max artifact_refs per message (D5; bounds the worst-case record size).
+MAX_ARTIFACT_REFS = int(os.environ.get("CC_COMMUNICATE_MAX_ARTIFACT_REFS", "16"))
 
 
 class InvalidArgumentError(ValueError):
@@ -99,6 +101,62 @@ def validate_message_size(message) -> str:
             f"(CC_COMMUNICATE_MAX_INLINE_BYTES); use artifact_refs instead",
             data={"limit_bytes": MAX_INLINE_BYTES, "actual_bytes": n})
     return message
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_artifact_refs(value) -> list:
+    """artifact_refs (D5): [{path|uri (EXACTLY one), size int>=0, sha256
+    64-hex, media_type non-empty str}], at most MAX_ARTIFACT_REFS entries.
+    None -> []. Any violation raises InvalidArgumentError (schema error, not
+    resource pressure). Returns canonical 4-field dicts (unknown keys
+    dropped)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise InvalidArgumentError(
+            f"artifact_refs must be a list; got {type(value).__name__}")
+    if len(value) > MAX_ARTIFACT_REFS:
+        raise InvalidArgumentError(
+            f"artifact_refs has {len(value)} entries, over the "
+            f"{MAX_ARTIFACT_REFS} cap (CC_COMMUNICATE_MAX_ARTIFACT_REFS)")
+    out = []
+    for i, ref in enumerate(value):
+        if not isinstance(ref, dict):
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}] must be a dict; got {type(ref).__name__}")
+        loc = None
+        for key in ("path", "uri"):
+            if ref.get(key) is not None:
+                loc = key
+                break
+        if loc is None:
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}] needs exactly one of 'path'/'uri'")
+        other = "uri" if loc == "path" else "path"
+        if ref.get(other) is not None:
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}] must have exactly one of 'path'/'uri' "
+                f"(both present)")
+        if not isinstance(ref[loc], str) or not ref[loc]:
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}].{loc} must be a non-empty str")
+        size = ref.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}].size must be an int >= 0; got {size!r}")
+        sha = ref.get("sha256")
+        if not isinstance(sha, str) or not _SHA256_RE.match(sha):
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}].sha256 must be 64 lowercase hex chars")
+        mt = ref.get("media_type")
+        if not isinstance(mt, str) or not mt:
+            raise InvalidArgumentError(
+                f"artifact_refs[{i}].media_type must be a non-empty str")
+        out.append({loc: ref[loc], "size": size, "sha256": sha,
+                    "media_type": mt})
+    return out
 
 
 def validate_cwd(value) -> str:

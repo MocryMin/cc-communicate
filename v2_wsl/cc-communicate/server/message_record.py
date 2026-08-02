@@ -36,7 +36,11 @@ RECORD_SUFFIX = ".json"
 
 def new_record(store_id: str, sequence: int, from_session: str, to_session: str,
                text: str, kind: str = "text", correlation_id=None,
-               causation_id=None, message_id: str = None) -> dict:
+               causation_id=None, message_id: str = None,
+               artifact_refs: list = None) -> dict:
+    payload = {"text": text}
+    if artifact_refs:
+        payload["artifact_refs"] = artifact_refs
     return {
         "schema_version": SCHEMA_VERSION,
         "message_id": message_id or uuid.uuid4().hex,
@@ -48,7 +52,7 @@ def new_record(store_id: str, sequence: int, from_session: str, to_session: str,
         "correlation_id": correlation_id,
         "causation_id": causation_id,
         "created_at_ms": int(time.time() * 1000),
-        "payload": {"text": text},
+        "payload": payload,
     }
 
 

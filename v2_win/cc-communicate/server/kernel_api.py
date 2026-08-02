@@ -96,11 +96,13 @@ def unregister_conversation(alive_conversations: dict, sid_a: str, sid_b: str) -
 
 def send_message(alive_conversations: dict, message_sequence: dict, store_id: str,
                  fromid: str, toid: str, message: str, message_id: str = None,
-                 kind: str = None, correlation_id: str = None) -> dict:
+                 kind: str = None, correlation_id: str = None,
+                 artifact_refs: list = None) -> dict:
     """HP-01: allocate a per-store sequence, wrap the text in a v1 record,
     atomically publish. HP-03 dedup: a retry carrying the same message_id
-    returns the ORIGINAL result without publishing a duplicate. Structured
-    dict result (HP-07) - callers branch on 'sent', never on text."""
+    returns the ORIGINAL result without publishing a duplicate. HP-09:
+    artifact_refs (D5) ride in the record payload. Structured dict result
+    (HP-07) - callers branch on 'sent', never on text."""
     a, b = sorted([fromid, toid])
     if (a, b) not in alive_conversations:
         return {"sent": False, "reason": "connection not registered"}
@@ -118,7 +120,8 @@ def send_message(alive_conversations: dict, message_sequence: dict, store_id: st
     fileutil.atomic_write_json(MESSAGE_SEQUENCE_FILE, message_sequence)
     rec = message_record.new_record(store_id, seq, fromid, toid, message,
                                     message_id=message_id, kind=kind or "text",
-                                    correlation_id=correlation_id)
+                                    correlation_id=correlation_id,
+                                    artifact_refs=artifact_refs)
     message_record.publish(d, rec)
     return {"sent": True, "message_id": rec["message_id"], "ts": rec["created_at_ms"],
             "correlation_id": correlation_id}

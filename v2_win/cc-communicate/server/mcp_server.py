@@ -81,11 +81,17 @@ def query_conversations(session_id: str) -> dict:
 
 @mcp.tool()
 def send_message(fromid: str, toid: str, message: str,
-                 correlation_id: str = None, kind: str = None) -> dict:
+                 correlation_id: str = None, kind: str = None,
+                 artifact_refs: list = None) -> dict:
     """Send a message to a peer's pipe. Routes to the conversation store (host
     for cross-machine, else local). The conversation must be registered
     (normally via connect) first. Returns the envelope: ok({message_id, ts});
-    err(NOT_FOUND) when not registered; err(INVALID_ARGUMENT) on a bad id."""
+    err(NOT_FOUND) when not registered; err(INVALID_ARGUMENT) on a bad id;
+    err(RESOURCE_EXHAUSTED) when the inline text exceeds
+    CC_COMMUNICATE_MAX_INLINE_BYTES (retryable False - switch to
+    artifact_refs). artifact_refs (D5): [{path|uri, size, sha256,
+    media_type}] describing out-of-band content; rides in the record payload
+    and is delivered to listeners."""
     checks = [(validation.validate_session_id, fromid),
               (validation.validate_session_id, toid),
               (validation.validate_message_size, message)]
@@ -93,11 +99,14 @@ def send_message(fromid: str, toid: str, message: str,
         checks.append((validation.validate_message_id, correlation_id))
     if kind is not None:
         checks.append((validation.validate_message_id, kind))
+    if artifact_refs is not None:
+        checks.append((validation.validate_artifact_refs, artifact_refs))
     err = _entry_error(*checks)
     if err:
         return err
     return user_functions.send_message(fromid, toid, message,
-                                       correlation_id=correlation_id, kind=kind)
+                                       correlation_id=correlation_id, kind=kind,
+                                       artifact_refs=artifact_refs)
 
 
 @mcp.tool()
