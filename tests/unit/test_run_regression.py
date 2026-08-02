@@ -45,6 +45,7 @@ def test_tree_without_server_py_is_red(tmp_path, monkeypatch, capsys):
     # pytest_run would re-collect THIS test file and recurse infinitely.
     monkeypatch.setattr(rr, "pytest_run", lambda: (rr.PASS, "ok"))
     monkeypatch.setattr(rr, "parity_run", lambda: (rr.PASS, "ok"))
+    monkeypatch.setattr(rr, "artifact_run", lambda: (rr.PASS, "ok"))
     code, out = _run(rr.main, [], capsys)
     assert code == 1
     assert "GATE: RED" in out
@@ -55,6 +56,7 @@ def test_gate_red_when_any_tier_red(monkeypatch, capsys):
     monkeypatch.setattr(rr, "syntax_check", lambda: (rr.RED, "boom"))
     monkeypatch.setattr(rr, "pytest_run", lambda: (rr.PASS, "ok"))
     monkeypatch.setattr(rr, "parity_run", lambda: (rr.PASS, "ok"))
+    monkeypatch.setattr(rr, "artifact_run", lambda: (rr.PASS, "ok"))
     code, out = _run(rr.main, ["--tier", "auto"], capsys)
     assert code == 1
     assert "T0 syntax" in out and "RED" in out
@@ -67,6 +69,7 @@ def test_gate_pass_only_when_all_green(monkeypatch, capsys):
     monkeypatch.setattr(rr, "pytest_run", lambda: (rr.PASS, "50 passed"))
     monkeypatch.setattr(rr, "parity_run",
                         lambda: (rr.PASS, "PARITY OK (120 files compared)"))
+    monkeypatch.setattr(rr, "artifact_run", lambda: (rr.PASS, "ok"))
     code, out = _run(rr.main, ["--tier", "auto"], capsys)
     assert code == 0
     assert out.strip().endswith("GATE: PASS")
@@ -76,7 +79,7 @@ def test_live_tier_prints_all_checklists_exits_0(capsys):
     rr = _import()
     code, out = _run(rr.main, ["--tier", "live"], capsys)
     assert code == 0
-    for hdr in ("L1", "L2", "L3", "L4", "L5", "L6"):
+    for hdr in ("L1", "L2", "L3", "L4", "L5", "L6", "L7"):
         assert hdr in out
 
 
@@ -85,6 +88,18 @@ def test_all_tier_runs_auto_then_prints_live(monkeypatch, capsys):
     monkeypatch.setattr(rr, "syntax_check", lambda: (rr.PASS, "ok"))
     monkeypatch.setattr(rr, "pytest_run", lambda: (rr.PASS, "ok"))
     monkeypatch.setattr(rr, "parity_run", lambda: (rr.PASS, "ok"))
+    monkeypatch.setattr(rr, "artifact_run", lambda: (rr.PASS, "ok"))
     code, out = _run(rr.main, ["--tier", "all"], capsys)
     assert code == 0
     assert "GATE: PASS" in out and "L1" in out
+
+
+def test_artifact_tier_red_fails_gate(monkeypatch, capsys):
+    rr = _import()
+    monkeypatch.setattr(rr, "syntax_check", lambda: (rr.PASS, "ok"))
+    monkeypatch.setattr(rr, "pytest_run", lambda: (rr.PASS, "ok"))
+    monkeypatch.setattr(rr, "parity_run", lambda: (rr.PASS, "ok"))
+    monkeypatch.setattr(rr, "artifact_run", lambda: (rr.RED, "ARTIFACTS FAIL"))
+    code, out = _run(rr.main, ["--tier", "auto"], capsys)
+    assert code == 1
+    assert "T2 artifacts" in out and "RED" in out

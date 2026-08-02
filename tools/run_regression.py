@@ -4,12 +4,13 @@ Usage:
   py -3 tools/run_regression.py [--tier auto|live|all]
 
   auto (default): run the scripted tiers T0 (syntax) / T1 (pytest) /
-    T2 (parity), print a per-tier table, exit 0 iff all PASS (GATE: PASS).
-  live: print the L1-L4 live-gate checklists - informational only, exit 0.
+    T2 (parity + HP-13-A artifact verify), print a per-tier table,
+    exit 0 iff all PASS (GATE: PASS).
+  live: print the L1-L7 live-gate checklists - informational only, exit 0.
   all: auto tiers first, then the live checklists.
 
-The gate is GREEN only when all 7 tiers (T0-T2 + L1-L4) pass. A RED tier
-means fix + retest before the wave transition it guards.
+The gate is GREEN only when all tiers (T0-T2 checks + L1-L7) pass. A RED
+tier means fix + retest before the wave transition it guards.
 """
 from __future__ import annotations
 
@@ -103,6 +104,18 @@ LIVE_CHECKLISTS = [
   Expected: correlation-matched reply; single-active CONFLICT; clean close/reuse
   Pass:     all four observations hold
   Record:   T# with correlation-match evidence + info.json states"""),
+    ("L7 - Wave-4 smoke: live behavior unchanged (HP-13-A)", """\
+  Why:      HP-13-A reorganized artifact production, not protocol; this smoke
+            gate proves the deliverable's core claim: install entry + live
+            behavior unchanged, cross-realm install path untouched
+  Prereq:   parity + artifacts green; WSL peer registered (L3-style)
+  Steps:    spawn ONE collaborator via repo v2_win (spawn_collaborator) ->
+            send 1 message -> worker acks -> check_alive == 1 ->
+            check_alive(WSL peer) == 1 -> one cross-realm probe message
+  Expected: spawn/ack works through the canonical tree; WSL peer alive and
+            responds (cross-realm path intact)
+  Pass:     send+ack ok AND WSL peer alive with a routed reply
+  Record:   T# with ack evidence + peer reply"""),
 ]
 
 
@@ -175,6 +188,15 @@ def parity_run():
     return PASS, r.stdout.strip().splitlines()[-1]
 
 
+def artifact_run():
+    """T2 second sub-step (HP-13-A): committed artifacts must equal what
+    tools/build_artifacts.py generate would produce."""
+    r = _run([sys.executable, str(TOOLS / "build_artifacts.py"), "verify"])
+    if r.returncode:
+        return RED, (r.stdout.strip() or r.stderr.strip()).splitlines()[-1]
+    return PASS, r.stdout.strip().splitlines()[-1]
+
+
 def print_live_checklists():
     for header, body in LIVE_CHECKLISTS:
         print(header)
@@ -197,7 +219,8 @@ def main(argv=None) -> int:
         return 1
     results = [("T0 syntax", syntax_check()),
                ("T1 pytest", pytest_run()),
-               ("T2 parity", parity_run())]
+               ("T2 parity", parity_run()),
+               ("T2 artifacts", artifact_run())]
     for name, (status, detail) in results:
         print("%-10s %-4s (%s)" % (name, status, detail))
     gate_ok = all(status == PASS for _, (status, _) in results)
