@@ -1009,3 +1009,21 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
   incl. the mandated L3/L4) deferred to the Wave 3 exit gate per the user's
   locked decision.
 - **Confidence**: high for unit semantics; live verification at Wave 3 exit.
+
+### T44 — HP-11 unit acceptance: schema validation + migration tool (D2, custom data root recoverable)
+
+- **Method**: unit (test_schema.py / test_kernel_schema_guard.py /
+  test_migrate_data.py): schema_too_new matrix (int>supported only);
+  unwrap dual-read (wrapped v1 + legacy flat/list); stamp_v1/wrap_v1
+  migrate + idempotent no-op; validate_layout (dirs advisory, newer file
+  REFUSED); kernel loaders skip newer-format state files with a loud log
+  (file untouched); dual-read of sessions/alive_convs/ack_timestamps;
+  writers emit {schema_version: 1, <key>: <payload>} (incl.
+  upload_ack_timestamp); migrate_data.py CLI via subprocess: dry-run writes
+  nothing, migration wraps/stamps the 4 registries, second run no-op,
+  newer schema -> exit 1 + untouched. Full auto gate
+  `py -3 tools/run_regression.py --tier auto` -> GATE PASS.
+- **Result**: PASS (unit + auto gate; parity OK). Live gates (full L1-L6,
+  incl. the mandated L3/L4) run NEXT at the Wave 3 exit gate per the user's
+  locked decision.
+- **Confidence**: high for unit semantics + CLI behavior; live gate pending.
