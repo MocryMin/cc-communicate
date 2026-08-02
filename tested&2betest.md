@@ -953,3 +953,16 @@ without risking stray CC processes, trust prompts, or needing two live CCs.
 - **Decision (user-approved)**: L3/L4 from the standing gate were NOT re-run this wave. Rationale: the wave's live risk areas were exactly the new spawn disambiguation (L5 PASS) and connection correlation (L6 PASS); L4 would re-verify the message path (send/listen unchanged except envelope wraps, unit-tested); L3 would re-verify cross-realm cursor semantics (unchanged) plus the new 3-line routing wrappers (activate/get/deactivate_connection), which mirror the already-live-proven `_register`/`_send` pattern and are unit-tested. Recorded rather than silently skipped.
 - **Wave gate summary**: L1 PASS / L2 PASS (T38) / L5 PASS / L6 PASS (T37) / L3+L4 not re-run (T39). Auto tiers: T0/T1/T2 GATE PASS (117 tests, PARITY OK 29 files).
 - **Confidence**: high for the run tiers; the skipped tiers carry the documented rationale above.
+
+### T40 — HP-08 impl finding: module name `gc.py` collides with the Python stdlib `gc` (FIXED: renamed `cleanup.py`)
+
+- **Method**: Task 3 of the HP-08 plan created `server/gc.py`; the first test run failed with
+  `AttributeError: module 'gc' has no attribute 'pending_marker_expired'` — `importlib.import_module("gc")`
+  (and any `import gc` in kernel.py/kernel_api.py) resolves to the already-imported STDLIB `gc`
+  (garbage collector) in `sys.modules`, not the new file. Renamed the module to `server/cleanup.py`
+  (function names unchanged: `run_gc`/`maybe_run_gc`/`pending_marker_expired`/`collect_candidates`);
+  updated conftest reload list, test references, plan/spec docs. Also removed a stale `gc.py` that a
+  pre-rename sync had copied into v2_wsl (parity was the detector).
+- **Result**: FIXED — 7/7 gc tests pass, full suite green (133 tests), parity OK.
+- **Confidence**: high. Lesson: avoid module names that shadow stdlib names in this sys.path-inserted
+  test setup; parity gate caught the stale-tree residue.

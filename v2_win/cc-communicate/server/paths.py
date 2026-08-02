@@ -39,6 +39,7 @@ CURSORS_FILE = os.path.join(SERVER_DATA_DIR, 'cursors.json')  # per-sid per-stor
 MACHINE_IDENTITY_FILE = os.path.join(SERVER_DATA_DIR, 'machine_identity.json')  # this machine's {type, id, claude_bin}
 OPERATION_JOURNAL_FILE = os.path.join(SERVER_DATA_DIR, 'operation_journal.json')  # HP-03 mutation journal
 TERMINATE_FLAG = os.path.join(SERVER_DATA_DIR, 'terminate.flag')  # kernel_terminate signal (kernel loop checks this)
+GC_STATE_FILE = os.path.join(SERVER_DATA_DIR, 'gc_state.json')  # HP-08: last-run timestamp for the daily GC sweep
 
 
 def ensure_runtime_dirs():

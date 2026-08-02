@@ -83,7 +83,7 @@ NEW:
 
 ---
 
-## 2. Safe GC: new module `server/gc.py`
+## 2. Safe GC: new module `server/cleanup.py`
 
 ### 2.1 Whitelist (the ONLY things GC may touch — hard-excluded: `pipe/`, `log/`)
 

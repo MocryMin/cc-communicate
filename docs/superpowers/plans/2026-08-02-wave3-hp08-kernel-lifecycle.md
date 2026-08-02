@@ -5,14 +5,14 @@
 
 **Goal:** Decouple the kernel's exit decision from conversation registration (D10), add a safe whitelist GC, add a pending_spawn marker TTL, fix the T38 spawn-env leak, and dedup the `_pid_live`/`_match` liveness logic.
 
-**Architecture:** Exit looks ONLY at queue/activity/terminate-flag — registration is persistent data (`alive_conversations.json`), not a process lease; restart+reload is the safety net, client retry + `_wake_remote` the race backstop, and a second queue scan the optimization. GC lives in a new `server/gc.py` module (whitelist = session_ctrl ≥7d, pending_spawn > TTL, queue/responses ≥7d; `pipe/`/`log/` structurally untouchable), triggered at kernel start + daily + on-demand RPC.
+**Architecture:** Exit looks ONLY at queue/activity/terminate-flag — registration is persistent data (`alive_conversations.json`), not a process lease; restart+reload is the safety net, client retry + `_wake_remote` the race backstop, and a second queue scan the optimization. GC lives in a new `server/cleanup.py` module (whitelist = session_ctrl ≥7d, pending_spawn > TTL, queue/responses ≥7d; `pipe/`/`log/` structurally untouchable), triggered at kernel start + daily + on-demand RPC.
 
 **Tech Stack:** Python 3 (`py -3`), pytest, psutil (liveness), filelock (ensure_core). No new dependencies.
 
 ## Global Constraints
 
 - **`py -3` for ALL Python** on Windows (git-bash; quote paths with spaces/CJK).
-- **Tests isolated**: conftest `server` fixture sets `CC_COMMUNICATE_DATA_DIR` → tmp_path and reloads modules per test. New module `gc` MUST be added to the conftest reload list (Task 3).
+- **Tests isolated**: conftest `server` fixture sets `CC_COMMUNICATE_DATA_DIR` → tmp_path and reloads modules per test. New module `cleanup` MUST be added to the conftest reload list (Task 3).
 - **Parity**: v2_win ↔ v2_wsl byte-identical outside `.mcp.json`; sync modified files BEFORE any parity run (Task 6); verify with `py -3 tools/check_parity.py`.
 - **Commit format**: `feat/fix/test/docs(scope): subject` + `Co-Authored-By: Claude <noreply@anthropic.com>`; work on main (user consent).
 - **Records**: every bug found during implementation gets a T# entry in `tested&2betest.md` §1 (Method/Result/Confidence).
@@ -290,21 +290,21 @@ git commit -m "fix(HP-08/T38): spawn env sanitization - strip CLAUDE_CODE_CHILD_
 
 ---
 
-### Task 3: `server/gc.py` — safe-GC module (whitelist + run_gc + state + maybe_run_gc)
+### Task 3: `server/cleanup.py` — safe-GC module (whitelist + run_gc + state + maybe_run_gc)
 
 **Files:**
-- Create: `v2_win/cc-communicate/server/gc.py`
+- Create: `v2_win/cc-communicate/server/cleanup.py`
 - Modify: `v2_win/cc-communicate/server/paths.py` (add `GC_STATE_FILE`)
 - Modify: `tests/conftest.py` (add `"gc"` to the reload list)
 - Create: `tests/unit/test_gc.py`
 
 **Interfaces:**
 - Produces:
-  - `gc.PENDING_SPAWN_TTL_SECONDS` (float, env `CC_COMMUNICATE_PENDING_SPAWN_TTL_SECONDS`, default 3600)
-  - `gc.pending_marker_expired(path) -> bool` (created_at_ms-based, mtime fallback)
-  - `gc.collect_candidates() -> dict[str, list[str]]` — `{"session_ctrl": [...], "pending_spawn": [...], "responses": [...]}`
-  - `gc.run_gc(dry_run=False) -> {"deleted": int, "dry_run": bool, "violations": list, "details": list}`
-  - `gc.gc_due(last_run_at) -> bool`; `gc.load_last_gc_run() -> float|None`; `gc.save_last_gc_run(ts)`; `gc.maybe_run_gc() -> dict|None`
+  - cleanup.PENDING_SPAWN_TTL_SECONDS` (float, env `CC_COMMUNICATE_PENDING_SPAWN_TTL_SECONDS`, default 3600)
+  - cleanup.pending_marker_expired(path) -> bool` (created_at_ms-based, mtime fallback)
+  - cleanup.collect_candidates() -> dict[str, list[str]]` — `{"session_ctrl": [...], "pending_spawn": [...], "responses": [...]}`
+  - cleanup.run_gc(dry_run=False) -> {"deleted": int, "dry_run": bool, "violations": list, "details": list}`
+  - cleanup.gc_due(last_run_at) -> bool`; cleanup.load_last_gc_run() -> float|None`; cleanup.save_last_gc_run(ts)`; cleanup.maybe_run_gc() -> dict|None`
 - Consumes: `paths.{SESSION_CTRL_DIR, PENDING_SPAWN_DIR, QUEUE_RESPONSES_DIR, GC_STATE_FILE}`, `fileutil.atomic_write_json`.
 
 - [ ] **Step 1: Add `GC_STATE_FILE` to `paths.py`**
@@ -321,7 +321,7 @@ In `tests/conftest.py` (line 30-33), insert `"gc"` after `"spawn"` (it must relo
 
 ```python
     for name in ("paths", "result", "validation", "proc", "conversations",
-                 "spawn", "gc", "machine_identity", "check_core", "rpc_client",
+                 "spawn", "cleanup", "machine_identity", "check_core", "rpc_client",
                  "kernel_api", "kernel"):
 ```
 
@@ -444,9 +444,9 @@ def test_gc_due_and_state(server):
 Run: `py -3 -m pytest tests/unit/test_gc.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'gc'` (paths/conftest changes alone don't create the module)
 
-- [ ] **Step 5: Implement `server/gc.py`**
+- [ ] **Step 5: Implement `server/cleanup.py`**
 
-Create `v2_win/cc-communicate/server/gc.py`:
+Create `v2_win/cc-communicate/server/cleanup.py`:
 
 ```python
 """Safe GC for the cc-communicate data root (HP-08 / D10).
@@ -618,8 +618,8 @@ Expected: PASS (8 passed)
 - [ ] **Step 7: Commit**
 
 ```bash
-git add v2_win/cc-communicate/server/gc.py v2_win/cc-communicate/server/paths.py tests/conftest.py tests/unit/test_gc.py
-git commit -m "feat(HP-08): safe-GC module - whitelist + min-age + dry-run + daily state (gc.py)"
+git add v2_win/cc-communicate/server/cleanup.py v2_win/cc-communicate/server/paths.py tests/conftest.py tests/unit/test_gc.py
+git commit -m "feat(HP-08): safe-GC module - whitelist + min-age + dry-run + daily state (cleanup.py)"
 ```
 
 ---
@@ -631,7 +631,7 @@ git commit -m "feat(HP-08): safe-GC module - whitelist + min-age + dry-run + dai
 - Modify: `tests/unit/test_spawn_token.py` (extend helper + 3 new tests)
 
 **Interfaces:**
-- Consumes: `gc.pending_marker_expired(path)`, `gc.PENDING_SPAWN_TTL_SECONDS` (Task 3).
+- Consumes: cleanup.pending_marker_expired(path)`, cleanup.PENDING_SPAWN_TTL_SECONDS` (Task 3).
 - Produces: unchanged signatures — `has_pending_spawn(token) -> bool` (expired ⇒ False), `claim_pending_spawn(spawn_tokens, token, session_id) -> dict` (expired ⇒ same no-pending result as missing).
 
 - [ ] **Step 1: Write the failing tests (extend `test_spawn_token.py`)**
@@ -691,7 +691,7 @@ Expected: FAIL — `test_has_pending_spawn_expired_marker` asserts False but get
 - [ ] **Step 3: Implement the TTL in `kernel_api.py`**
 
 In `v2_win/cc-communicate/server/kernel_api.py`:
-1. Add `import gc` to the imports (with the other `import X` lines; note `import conversations` style is already used).
+1. Add `import cleanup` to the imports (with the other `import X` lines; note `import conversations` style is already used).
 2. Replace `has_pending_spawn` (lines 294-295):
 
 ```python
@@ -736,11 +736,11 @@ git commit -m "feat(HP-08): pending_spawn marker TTL - expired markers count as 
 - Create: `tests/unit/test_kernel_exit.py`
 
 **Interfaces:**
-- Consumes: `gc.maybe_run_gc()` (Task 3); `kernel_api.run_gc` (added here).
+- Consumes: cleanup.maybe_run_gc()` (Task 3); `kernel_api.run_gc` (added here).
 - Produces:
   - `kernel._should_exit() -> bool` — queue/activity/terminate ONLY (registration no longer blocks).
   - `kernel._exit_decision() -> bool` — `_should_exit` + R4 second queue scan.
-  - `kernel_api.run_gc(dry_run=False) -> dict` — dispatcher wrapper around `gc.run_gc`.
+  - `kernel_api.run_gc(dry_run=False) -> dict` — dispatcher wrapper around cleanup.run_gc`.
   - `validation.validate_bool(value) -> bool` — raises `InvalidArgumentError` on non-bool.
 
 - [ ] **Step 1: Write the failing tests**
@@ -853,7 +853,7 @@ Expected: FAIL — `test_registered_but_idle_exits` (old predicate returns False
 - [ ] **Step 3: Rewrite the exit predicate + add `_exit_decision` in `kernel.py`**
 
 In `v2_win/cc-communicate/server/kernel.py`:
-1. Add `import gc` to the imports.
+1. Add `import cleanup` to the imports.
 2. Replace `_should_exit` (lines 482-493):
 
 ```python
