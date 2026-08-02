@@ -42,6 +42,16 @@ class InvalidArgumentError(ValueError):
         super().__init__(f"{self.code}: {message}")
 
 
+class ResourceExhaustedError(InvalidArgumentError):
+    """Over a resource budget (D5): maps to code RESOURCE_EXHAUSTED at the
+    entry boundary; carries structured bytes data for the caller."""
+    code = Code.RESOURCE_EXHAUSTED
+
+    def __init__(self, message: str, data: dict = None):
+        super().__init__(message)
+        self.data = data
+
+
 def _check_id(value, kind: str) -> str:
     if not isinstance(value, str) or not _ID_RE.match(value):
         raise InvalidArgumentError(
@@ -84,9 +94,10 @@ def validate_message_size(message) -> str:
             f"message must be a str; got {type(message).__name__}")
     n = len(message.encode("utf-8"))
     if n > MAX_INLINE_BYTES:
-        raise InvalidArgumentError(
+        raise ResourceExhaustedError(
             f"message is {n} bytes, over the {MAX_INLINE_BYTES}-byte inline cap "
-            f"(CC_COMMUNICATE_MAX_INLINE_BYTES); use artifact_refs instead")
+            f"(CC_COMMUNICATE_MAX_INLINE_BYTES); use artifact_refs instead",
+            data={"limit_bytes": MAX_INLINE_BYTES, "actual_bytes": n})
     return message
 
 

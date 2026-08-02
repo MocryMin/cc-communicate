@@ -25,15 +25,17 @@ mcp = FastMCP("cc-communicate")
 
 def _entry_error(*checks):
     """Run MCP-entry validators (HP-06). `checks` are (validator, value) pairs.
-    Returns the INVALID_ARGUMENT envelope, or None when all pass. Kernel
-    dispatch validates again - defense in depth, and remote RPC never passes
-    through here."""
+    Returns the error envelope (code from the exception - INVALID_ARGUMENT by
+    default, RESOURCE_EXHAUSTED from ResourceExhaustedError), or None when all
+    pass. Kernel dispatch validates again - defense in depth, and remote RPC
+    never passes through here."""
     try:
         for validator, value in checks:
             validator(value)
     except validation.InvalidArgumentError as e:
-        return {"ok": False, "code": Code.INVALID_ARGUMENT,
-                "message": str(e), "data": None, "retryable": False}
+        return {"ok": False, "code": getattr(e, "code", Code.INVALID_ARGUMENT),
+                "message": str(e), "data": getattr(e, "data", None),
+                "retryable": False}
     return None
 
 
